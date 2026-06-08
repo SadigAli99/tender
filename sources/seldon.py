@@ -74,6 +74,44 @@ EXCLUDED_TITLE_WORDS = [
 ]
 
 
+PRICE_LABELS = [
+    "НМЦК",
+    "Начальная цена",
+    "Начальная максимальная цена",
+    "Начальная максимальная цена контракта",
+    "Начальная (максимальная) цена контракта",
+    "Начальная (максимальная) цена",
+    "Цена контракта",
+    "Цена",
+]
+
+
+PRICE_STOP_LABELS = [
+    "Обеспечение заявки",
+    "Обеспечение контракта",
+    "Конечная цена",
+    "Валюта",
+    "Организатор",
+    "Заказчик",
+    "ИНН",
+    "Регион",
+    "E-mail",
+    "ЭТП",
+    "Ссылка",
+    "Проведение аукциона",
+    "Дата изменения",
+    "Тип закупки",
+    "Тип закупки с ЕИС",
+    "Статус",
+    "Осталось дней",
+    "Начало приема",
+    "Окончание приема",
+    "Способ закупки",
+    "Наименование",
+    "Полное наименование",
+]
+
+
 def clean_text(value):
     if not value:
         return ""
@@ -263,28 +301,6 @@ def extract_dates_from_text(text):
 
 
 def extract_grid_row_info_from_anchor(anchor):
-    """
-    Əsas fix buradadır.
-
-    Seldon grid-də title link-in olduğu row-u JS ilə tapırıq.
-    Sonra həmin row-un cell-lərini ayrıca oxuyuruq.
-
-    Screenshot-a görə sütun sırası belədir:
-    0 checkbox
-    1 star
-    2 status dot
-    3 comment
-    4 %
-    5 Осталось
-    6 Начало приема
-    7 Окончание приема
-    8 Способ закупки
-    9 Наименование
-    10 НМЦК
-    11 Обеспечение заявки
-    ...
-    """
-
     try:
         data = anchor.evaluate(
             """
@@ -369,16 +385,6 @@ def extract_grid_row_info_from_anchor(anchor):
 
 
 def extract_price_from_grid_cells(cells, row_text):
-    """
-    НМЦК sütunu screenshot-da title-dan sonra gəlir.
-    Amma DOM fərqli ola bilər.
-    Ona görə həm cell-lərdən, həm də row_text-dən pul formatlarını oxuyuruq.
-
-    Əsas qayda:
-    - Faiz, tarix, "Осталось дней" kimi rəqəmləri saymırıq.
-    - 450000+ olan real pul formatlarını götürürük.
-    """
-
     candidates = []
 
     for cell in cells:
@@ -429,9 +435,6 @@ def extract_deadline_from_grid_cells(cells, row_text):
     if not dates:
         dates = extract_dates_from_text(row_text)
 
-    # Seldon grid-də adətən:
-    # 1-ci tarix: Начало приема заявок
-    # 2-ci tarix: Окончание приема заявок
     if len(dates) >= 2:
         return clean_text(dates[1])
 
@@ -574,7 +577,7 @@ def extract_value_after_label_by_lines(text, labels, stop_labels=None):
             if lowered == label:
                 collected = []
 
-                for next_line in lines[index + 1:index + 8]:
+                for next_line in lines[index + 1:index + 10]:
                     next_lower = next_line.lower()
 
                     if any(next_lower.startswith(stop) for stop in stop_lower):
@@ -582,7 +585,7 @@ def extract_value_after_label_by_lines(text, labels, stop_labels=None):
 
                     collected.append(next_line)
 
-                    if len(" ".join(collected)) > 20:
+                    if len(" ".join(collected)) > 80:
                         break
 
                 return clean_text(" ".join(collected))
@@ -613,6 +616,80 @@ def extract_date_after_label(text, labels):
                 return clean_text(dates[0])
 
     return ""
+
+
+def extract_price_from_detail_text(body_text):
+    """
+    Əsas qiymət parseri budur.
+
+    Prioritet:
+    1. Detail səhifədə НМЦК / Начальная цена / Цена контракта label-ı
+    2. Label-in yanında və ya altındakı qiymət
+    3. Tapılmasa 0 qaytarır, sonra grid fallback işləyir
+    """
+
+    if not body_text:
+        return "", 0
+
+    lines = split_lines(body_text)
+    labels_lower = [x.lower() for x in PRICE_LABELS]
+    stop_lower = [x.lower() for x in PRICE_STOP_LABELS]
+
+    for index, line in enumerate(lines):
+        lowered = line.lower()
+
+        matched_label = None
+
+        for label in labels_lower:
+            if lowered == label or lowered.startswith(label + ":") or label in lowered:
+                matched_label = label
+                break
+
+        if not matched_label:
+            continue
+
+        chunks = [line]
+
+        for next_line in lines[index + 1:index + 12]:
+            next_lower = next_line.lower()
+
+            if any(next_lower.startswith(stop) for stop in stop_lower):
+                break
+
+            chunks.append(next_line)
+
+            joined = " ".join(chunks)
+
+            if parse_price_to_number(joined):
+                break
+
+        candidate_text = clean_text(" ".join(chunks))
+        price_number = parse_price_to_number(candidate_text)
+
+        if price_number:
+            return candidate_text, price_number
+
+    normalized_text = clean_text(body_text)
+
+    for label in PRICE_LABELS:
+        pattern = (
+            re.escape(label)
+            + r".{0,160}?("
+            + r"\d{1,3}(?:\s\d{3})+(?:[,.]\d{1,2})?"
+            + r"|\d{6,}(?:[,.]\d{1,2})?"
+            + r")"
+        )
+
+        match = re.search(pattern, normalized_text, re.IGNORECASE)
+
+        if match:
+            candidate_text = clean_text(match.group(0))
+            price_number = parse_price_to_number(candidate_text)
+
+            if price_number:
+                return candidate_text, price_number
+
+    return "", 0
 
 
 def get_title_from_detail_page(detail_page):
@@ -693,6 +770,11 @@ def parse_seldon_detail(page, grid_item, keyword):
 
         title = get_title_from_detail_page(detail_page)
 
+        body_text_after_title = safe_inner_text(detail_page.locator("body").first, timeout=15000)
+
+        if body_text_after_title:
+            body_text = body_text_after_title
+
         if not title:
             title = grid_title
 
@@ -706,24 +788,17 @@ def parse_seldon_detail(page, grid_item, keyword):
             print("[SELDON] Keçildi, title exclude filter:", title)
             return None
 
-        price_number = grid_price_number
+        detail_price_text, price_number = extract_price_from_detail_text(body_text)
 
-        if not price_number:
-            detail_price_text = extract_value_after_label_by_lines(
-                body_text,
-                [
-                    "НМЦК",
-                    "Начальная цена",
-                    "Начальная максимальная цена",
-                    "Цена контракта",
-                    "Цена",
-                ]
-            )
-
-            price_number = parse_price_to_number(detail_price_text)
+        if price_number:
+            print("[SELDON] Qiymət detail səhifədən götürüldü:", detail_price_text)
+        else:
+            price_number = grid_price_number
+            print("[SELDON] Qiymət detail-də tapılmadı, grid fallback istifadə olundu:", grid_price)
 
         if not price_number:
             print("[SELDON] Keçildi, qiymət tapılmadı:", title)
+            print("[SELDON] Detail price text:", detail_price_text)
             print("[SELDON] Grid price:", grid_price)
             return None
 
