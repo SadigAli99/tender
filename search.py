@@ -119,6 +119,44 @@ def is_blocked_status(tender):
     return any(word in status for word in blocked_words)
 
 
+def is_blocked_tender_type(tender):
+    """
+    44-ФЗ və 223-ФЗ tipli tenderləri bütün source-lar üçün bloklayır.
+
+    Seldon, Kontur və Rostender-də tip mətni fərqli formada gələ bilər:
+    - 44-ФЗ
+    - 223-ФЗ
+    - Закупка по 44-ФЗ
+    - Электронный аукцион 223-ФЗ
+    - Федеральный закон № 44-ФЗ
+
+    Ona görə yoxlama tender_type / purchase_type / type sahələri üzərindən
+    ümumi mətn axtarışı ilə aparılır.
+    """
+
+    tender_type = get_tender_type(tender)
+
+    if not tender_type:
+        return False
+
+    tender_type = str(tender_type).lower().strip()
+
+    blocked_patterns = [
+        "44-фз",
+        "44 фз",
+        "44fz",
+        "44-fz",
+        "№ 44-фз",
+        "223-фз",
+        "223 фз",
+        "223fz",
+        "223-fz",
+        "№ 223-фз",
+    ]
+
+    return any(pattern in tender_type for pattern in blocked_patterns)
+
+
 def get_rub_to_azn_rate():
     """
     CBAR tarixli XML-dən RUB -> AZN məzənnəsini götürür.
@@ -648,6 +686,13 @@ def main():
                         print(tender["title"])
                         print(tender["url"])
                         print("Status:", tender.get("status"))
+                        continue
+
+                    if is_blocked_tender_type(tender):
+                        print("Keçildi, tender tipi bloklanıb:")
+                        print(tender["title"])
+                        print(tender["url"])
+                        print("Tip:", get_tender_type(tender))
                         continue
 
                     if is_price_below_minimum(tender):
