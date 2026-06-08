@@ -1,4 +1,6 @@
 import sqlite3
+import hashlib
+import re
 
 DB_NAME = "tenders.db"
 
@@ -18,6 +20,88 @@ def column_exists(cursor, table_name, column_name):
     return False
 
 
+def normalize_title(title: str) -> str:
+    """
+    Tender başlığını source-lar arasında müqayisə üçün standart formaya salır.
+    Məsələn:
+    «Личный кабинет» və Личный кабинет eyni qəbul olunacaq.
+    """
+    if not title:
+        return ""
+
+    title = str(title).lower()
+
+    replacements = {
+        "«": " ",
+        "»": " ",
+        '"': " ",
+        "“": " ",
+        "”": " ",
+        "„": " ",
+        "–": " ",
+        "—": " ",
+        "-": " ",
+        "№": " ",
+    }
+
+    for old, new in replacements.items():
+        title = title.replace(old, new)
+
+    # Hərf və rəqəmdən başqa simvolları boşluğa çeviririk
+    title = re.sub(r"[^a-zа-яё0-9]+", " ", title, flags=re.IGNORECASE)
+
+    # Artıq boşluqları təmizləyirik
+    title = re.sub(r"\s+", " ", title).strip()
+
+    return title
+
+
+def normalize_price(price) -> str:
+    """
+    Qiyməti standart tam ədəd formaya salır.
+    Məsələn:
+    4 636 000.00 ₽ -> 4636000
+    4 636 000,00 -> 4636000
+    """
+    if price is None:
+        return ""
+
+    price = str(price)
+
+    price = price.replace("₽", "")
+    price = price.replace("руб.", "")
+    price = price.replace("руб", "")
+    price = price.replace("Руб.", "")
+    price = price.replace("Руб", "")
+    price = price.replace("\xa0", "")
+    price = price.replace(" ", "")
+    price = price.replace(",", ".")
+
+    match = re.search(r"\d+(?:\.\d+)?", price)
+
+    if not match:
+        return ""
+
+    return str(int(float(match.group(0))))
+
+
+def make_content_hash(title: str, price) -> str:
+    """
+    Eyni tenderi fərqli source-lardan tanımaq üçün hash yaradır.
+    Əsas prinsip:
+    normalized_title + normalized_price
+    """
+    normalized_title = normalize_title(title)
+    normalized_price = normalize_price(price)
+
+    if not normalized_title or not normalized_price:
+        return ""
+
+    raw_value = f"{normalized_title}|{normalized_price}"
+
+    return hashlib.sha256(raw_value.encode("utf-8")).hexdigest()
+
+
 def init_db():
     connection = get_connection()
     cursor = connection.cursor()
@@ -30,6 +114,8 @@ def init_db():
             keyword TEXT NOT NULL,
             source TEXT,
             content_hash TEXT,
+            normalized_title TEXT,
+            price_rub TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -44,6 +130,18 @@ def init_db():
         cursor.execute("""
             ALTER TABLE sent_tenders
             ADD COLUMN content_hash TEXT
+        """)
+
+    if not column_exists(cursor, "sent_tenders", "normalized_title"):
+        cursor.execute("""
+            ALTER TABLE sent_tenders
+            ADD COLUMN normalized_title TEXT
+        """)
+
+    if not column_exists(cursor, "sent_tenders", "price_rub"):
+        cursor.execute("""
+            ALTER TABLE sent_tenders
+            ADD COLUMN price_rub TEXT
         """)
 
     cursor.execute("""
@@ -63,10 +161,10 @@ def tender_exists(tender_url=None, content_hash=None):
     connection = get_connection()
     cursor = connection.cursor()
 
-    if tender_url:
+    if content_hash:
         cursor.execute(
-            "SELECT id FROM sent_tenders WHERE tender_url = ? LIMIT 1",
-            (tender_url,)
+            "SELECT id FROM sent_tenders WHERE content_hash = ? LIMIT 1",
+            (content_hash,)
         )
 
         result = cursor.fetchone()
@@ -75,10 +173,10 @@ def tender_exists(tender_url=None, content_hash=None):
             connection.close()
             return True
 
-    if content_hash:
+    if tender_url:
         cursor.execute(
-            "SELECT id FROM sent_tenders WHERE content_hash = ? LIMIT 1",
-            (content_hash,)
+            "SELECT id FROM sent_tenders WHERE tender_url = ? LIMIT 1",
+            (tender_url,)
         )
 
         result = cursor.fetchone()
@@ -95,21 +193,36 @@ def save_tender(tender):
     connection = get_connection()
     cursor = connection.cursor()
 
+    title = tender.get("title", "")
+    price = tender.get("price", "")
+
+    normalized_title = normalize_title(title)
+    price_rub = normalize_price(price)
+
+    content_hash = tender.get("content_hash", "")
+
+    if not content_hash:
+        content_hash = make_content_hash(title, price)
+
     cursor.execute("""
         INSERT OR IGNORE INTO sent_tenders (
             tender_url,
             title,
             keyword,
             source,
-            content_hash
+            content_hash,
+            normalized_title,
+            price_rub
         )
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (
         tender.get("url", ""),
-        tender.get("title", ""),
+        title,
         tender.get("keyword", ""),
         tender.get("source", ""),
-        tender.get("content_hash", "")
+        content_hash,
+        normalized_title,
+        price_rub
     ))
 
     connection.commit()

@@ -1,5 +1,6 @@
 from sources.kontur import search_kontur
 from sources.rostender import search_rostender
+from sources.seldon import search_seldon
 
 
 ACTIVE_SOURCES = [
@@ -11,4 +12,8 @@ ACTIVE_SOURCES = [
         "name": "rostender.info",
         "search_func": search_rostender,
     },
+    {
+        "name" : "win.myseldon.com",
+        "search_func" : search_seldon
+    }
 ]

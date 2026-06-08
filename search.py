@@ -26,12 +26,10 @@ MAX_SEND_PER_KEYWORD = int(os.getenv("MAX_SEND_PER_KEYWORD", 1))
 # 450k RUB-dan aşağı tenderlər Telegram-a göndərilməyəcək
 MIN_PRICE_RUB = 450_000
 
-# Paylaşılma tarixi son 7 gün içində olmalıdır
-# Məsələn bu gün 04.06.2026-dırsa, 29.05.2026 və sonrası göndəriləcək
+# Paylaşılma tarixi son 3 gün içində olmalıdır
 MIN_PUBLISH_DATE = date.today() - timedelta(days=3)
 
 # Son müraciət tarixi ən azı 3 gün sonra olmalıdır
-# Məsələn bu gün 04.06.2026-dırsa, ən tez 07.06.2026 olanlar göndəriləcək
 MIN_DEADLINE_DATE = date.today() + timedelta(days=3)
 
 
@@ -94,9 +92,6 @@ def is_deadline_too_close_or_missing(tender):
     if deadline_date is None:
         return True
 
-    # Bu gün 04.06.2026-dırsa:
-    # 04, 05, 06 iyun keçilir
-    # 07 iyun və sonrası buraxılır
     return deadline_date < MIN_DEADLINE_DATE
 
 
@@ -137,7 +132,6 @@ def get_rub_to_azn_rate():
     1 RUB = 2.3795 / 100 AZN
 
     Əgər bu gün üçün XML açılmasa, son 10 günə baxır.
-    Bu, qeyri-iş günləri üçün lazımdır.
     """
 
     for day_offset in range(0, 10):
@@ -358,50 +352,64 @@ def get_publish_date(tender):
 
 
 def normalize_hash_text(value):
+    """
+    Tender title üçün normalizasiya.
+    Məqsəd:
+    - « » kimi dırnaqları silmək
+    - tire fərqlərini aradan qaldırmaq
+    - artıq boşluqları təmizləmək
+    - source-lar arasında eyni başlıqları eyni formaya salmaq
+    """
     if value is None:
         return ""
 
     value = str(value).lower().strip()
-    value = re.sub(r"\s+", " ", value)
+
+    replacements = {
+        "«": " ",
+        "»": " ",
+        '"': " ",
+        "“": " ",
+        "”": " ",
+        "„": " ",
+        "–": " ",
+        "—": " ",
+        "-": " ",
+        "№": " ",
+    }
+
+    for old, new in replacements.items():
+        value = value.replace(old, new)
+
+    value = re.sub(r"[^a-zа-яё0-9]+", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s+", " ", value).strip()
 
     return value
 
 
 def make_tender_content_hash(tender):
     """
-    Eyni tender fərqli URL ilə gəlsə belə təkrar göndərilməsin deyə
-    əsas məzmun məlumatlarından hash yaradırıq.
+    Eyni tender fərqli source-lardan gəlsə belə təkrar göndərilməsin deyə
+    yalnız əsas sabit məlumatlardan hash yaradırıq.
 
-    Status hash-ə daxil edilmir, çünki eyni tenderin statusu dəyişə bilər.
+    Əsas prinsip:
+    normalized_title + price
+
+    Burada source, organization, publish_date, deadline, status, type istifadə olunmur.
+    Çünki bu dəyərlər fərqli source-larda fərqli gələ bilər.
     """
 
-    source = normalize_hash_text(tender.get("source"))
     title = normalize_hash_text(tender.get("title"))
-
-    organization = normalize_hash_text(
-        tender.get("organization")
-        or tender.get("customer")
-        or tender.get("company")
-    )
 
     price_number = parse_price_to_number(tender.get("price"))
     price = str(int(price_number)) if price_number > 0 else ""
 
-    publish_date_raw = get_publish_date(tender)
-    publish_date_parsed = parse_date_from_text(publish_date_raw)
-
-    publish_date = (
-        publish_date_parsed.strftime("%d.%m.%Y")
-        if publish_date_parsed
-        else normalize_hash_text(publish_date_raw)
-    )
+    if not title or not price:
+        return ""
 
     raw_text = "|".join([
-        source,
         title,
-        organization,
-        price,
-        publish_date
+        price
     ])
 
     return hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
