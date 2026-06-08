@@ -75,8 +75,8 @@ EXCLUDED_TITLE_WORDS = [
 
 
 PRICE_LABELS = [
-    "НМЦК",
     "Начальная цена",
+    "НМЦК",
     "Начальная максимальная цена",
     "Начальная максимальная цена контракта",
     "Начальная (максимальная) цена контракта",
@@ -619,15 +619,6 @@ def extract_date_after_label(text, labels):
 
 
 def extract_price_from_detail_text(body_text):
-    """
-    Əsas qiymət parseri budur.
-
-    Prioritet:
-    1. Detail səhifədə НМЦК / Начальная цена / Цена контракта label-ı
-    2. Label-in yanında və ya altındakı qiymət
-    3. Tapılmasa 0 qaytarır, sonra grid fallback işləyir
-    """
-
     if not body_text:
         return "", 0
 
@@ -688,6 +679,150 @@ def extract_price_from_detail_text(body_text):
 
             if price_number:
                 return candidate_text, price_number
+
+    return "", 0
+
+
+def extract_price_from_detail_page(detail_page):
+    """
+    Detail səhifədə qiyməti DOM-dan götürür.
+    Screenshot-a görə əsas label:
+    Начальная цена -> 4 486 160,01 RUB
+    """
+
+    js = """
+    () => {
+        const labels = [
+            'Начальная цена',
+            'НМЦК',
+            'Начальная максимальная цена',
+            'Начальная максимальная цена контракта',
+            'Начальная (максимальная) цена контракта',
+            'Начальная (максимальная) цена',
+            'Цена контракта'
+        ];
+
+        function normalize(value) {
+            return (value || '')
+                .replace(/\\u00a0/g, ' ')
+                .replace(/\\s+/g, ' ')
+                .trim();
+        }
+
+        function getText(el) {
+            if (!el) return '';
+            return normalize(el.innerText || el.textContent || '');
+        }
+
+        function extractPrice(value) {
+            value = normalize(value);
+
+            const match = value.match(/\\d{1,3}(?:\\s\\d{3})+(?:[,.]\\d{1,2})?\\s*(?:RUB|руб\\.?|₽)?|\\d{6,}(?:[,.]\\d{1,2})?\\s*(?:RUB|руб\\.?|₽)?/i);
+
+            return match ? normalize(match[0]) : '';
+        }
+
+        const allElements = Array.from(document.querySelectorAll('body *'));
+
+        for (const label of labels) {
+            const labelLower = label.toLowerCase();
+
+            const labelNodes = allElements.filter(el => {
+                const text = getText(el).toLowerCase();
+
+                if (!text) return false;
+
+                return text === labelLower || text.includes(labelLower);
+            });
+
+            for (const node of labelNodes) {
+                const ownText = getText(node);
+                const ownPrice = extractPrice(ownText);
+
+                if (ownPrice && !ownText.toLowerCase().includes('обеспечение')) {
+                    return {
+                        priceText: ownPrice,
+                        sourceText: ownText,
+                        method: 'own_text'
+                    };
+                }
+
+                let parent = node.parentElement;
+
+                for (let level = 0; level < 6 && parent; level++) {
+                    const parentText = getText(parent);
+
+                    if (
+                        parentText.toLowerCase().includes(labelLower) &&
+                        parentText.length < 800
+                    ) {
+                        const price = extractPrice(parentText);
+
+                        if (price) {
+                            return {
+                                priceText: price,
+                                sourceText: parentText,
+                                method: 'parent_text'
+                            };
+                        }
+                    }
+
+                    parent = parent.parentElement;
+                }
+
+                let current = node;
+
+                for (let level = 0; level < 5 && current; level++) {
+                    let sibling = current.nextElementSibling;
+
+                    for (let i = 0; i < 6 && sibling; i++) {
+                        const siblingText = getText(sibling);
+                        const price = extractPrice(siblingText);
+
+                        if (price) {
+                            return {
+                                priceText: price,
+                                sourceText: siblingText,
+                                method: 'next_sibling'
+                            };
+                        }
+
+                        sibling = sibling.nextElementSibling;
+                    }
+
+                    current = current.parentElement;
+                }
+            }
+        }
+
+        return {
+            priceText: '',
+            sourceText: '',
+            method: ''
+        };
+    }
+    """
+
+    try:
+        data = detail_page.evaluate(js)
+    except Exception as e:
+        print("[SELDON] Detail DOM qiymət oxunmadı:", e)
+        return "", 0
+
+    if not data:
+        return "", 0
+
+    price_text = clean_text(data.get("priceText"))
+    source_text = clean_text(data.get("sourceText"))
+    method = clean_text(data.get("method"))
+
+    price_number = parse_price_to_number(price_text)
+
+    if price_number:
+        print("[SELDON] Qiymət detail DOM-dan götürüldü:", price_text)
+        print("[SELDON] Qiymət DOM method:", method)
+        print("[SELDON] Qiymət source:", source_text[:300])
+        return price_text, price_number
 
     return "", 0
 
@@ -788,13 +923,18 @@ def parse_seldon_detail(page, grid_item, keyword):
             print("[SELDON] Keçildi, title exclude filter:", title)
             return None
 
-        detail_price_text, price_number = extract_price_from_detail_text(body_text)
+        detail_price_text, price_number = extract_price_from_detail_page(detail_page)
 
         if price_number:
-            print("[SELDON] Qiymət detail səhifədən götürüldü:", detail_price_text)
+            print("[SELDON] Qiymət detail DOM-dan götürüldü:", detail_price_text)
         else:
-            price_number = grid_price_number
-            print("[SELDON] Qiymət detail-də tapılmadı, grid fallback istifadə olundu:", grid_price)
+            detail_price_text, price_number = extract_price_from_detail_text(body_text)
+
+            if price_number:
+                print("[SELDON] Qiymət detail text-dən götürüldü:", detail_price_text)
+            else:
+                price_number = grid_price_number
+                print("[SELDON] Qiymət detail-də tapılmadı, grid fallback istifadə olundu:", grid_price)
 
         if not price_number:
             print("[SELDON] Keçildi, qiymət tapılmadı:", title)
