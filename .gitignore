@@ -1,1 +1,7 @@
 .env
+venv/
+__pycache__/
+*.pyc
+tenders.db
+seldon_state.json
+seldon_storage_state.json
