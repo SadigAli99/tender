@@ -686,8 +686,18 @@ def extract_price_from_detail_text(body_text):
 def extract_price_from_detail_page(detail_page):
     """
     Detail səhifədə qiyməti DOM-dan götürür.
-    Screenshot-a görə əsas label:
-    Начальная цена -> 4 486 160,01 RUB
+
+    Bu funksiya grid/table qiymətini əsas götürmür.
+    Əsas prioritet detail səhifədə görünən bu blokdur:
+
+        Начальная цена
+        4 486 160,01 RUB
+
+    Qayda:
+    1. 'Начальная цена' label-i tapılır.
+    2. Eyni row/parent daxilində label-dən SONRA gələn qiymət götürülür.
+    3. 'Обеспечение заявки', 'Обеспечение контракта', 'Конечная цена'
+       kimi rəqəmlər qiymət kimi götürülmür.
     """
 
     js = """
@@ -702,11 +712,35 @@ def extract_price_from_detail_page(detail_page):
             'Цена контракта'
         ];
 
+        const badWords = [
+            'Обеспечение заявки',
+            'Обеспечение контракта',
+            'Конечная цена'
+        ];
+
         function normalize(value) {
             return (value || '')
                 .replace(/\\u00a0/g, ' ')
                 .replace(/\\s+/g, ' ')
                 .trim();
+        }
+
+        function isVisible(el) {
+            if (!el) return false;
+
+            const style = window.getComputedStyle(el);
+
+            if (
+                style.display === 'none' ||
+                style.visibility === 'hidden' ||
+                Number(style.opacity) === 0
+            ) {
+                return false;
+            }
+
+            const rect = el.getBoundingClientRect();
+
+            return rect.width > 0 && rect.height > 0;
         }
 
         function getText(el) {
@@ -717,52 +751,142 @@ def extract_price_from_detail_page(detail_page):
         function extractPrice(value) {
             value = normalize(value);
 
-            const match = value.match(/\\d{1,3}(?:\\s\\d{3})+(?:[,.]\\d{1,2})?\\s*(?:RUB|руб\\.?|₽)?|\\d{6,}(?:[,.]\\d{1,2})?\\s*(?:RUB|руб\\.?|₽)?/i);
+            const match = value.match(
+                /\\d{1,3}(?:\\s\\d{3})+(?:[,.]\\d{1,2})?\\s*(?:RUB|руб\\.?|₽)?|\\d{6,}(?:[,.]\\d{1,2})?\\s*(?:RUB|руб\\.?|₽)?/i
+            );
 
             return match ? normalize(match[0]) : '';
         }
 
-        const allElements = Array.from(document.querySelectorAll('body *'));
+        function cutBeforeBadWords(value) {
+            let result = normalize(value);
+
+            for (const badWord of badWords) {
+                const index = result.toLowerCase().indexOf(badWord.toLowerCase());
+
+                if (index !== -1) {
+                    result = result.slice(0, index);
+                }
+            }
+
+            return result;
+        }
+
+        function extractPriceAfterLabel(value, label) {
+            value = normalize(value);
+
+            const lowerValue = value.toLowerCase();
+            const lowerLabel = label.toLowerCase();
+
+            const labelIndex = lowerValue.indexOf(lowerLabel);
+
+            if (labelIndex === -1) {
+                return '';
+            }
+
+            let afterLabel = value.slice(labelIndex + label.length);
+            afterLabel = cutBeforeBadWords(afterLabel);
+
+            return extractPrice(afterLabel);
+        }
+
+        function directChildrenText(parent) {
+            if (!parent) return [];
+
+            return Array.from(parent.children)
+                .filter(isVisible)
+                .map(getText)
+                .filter(Boolean);
+        }
+
+        const allElements = Array.from(document.querySelectorAll('body *')).filter(isVisible);
 
         for (const label of labels) {
             const labelLower = label.toLowerCase();
 
             const labelNodes = allElements.filter(el => {
-                const text = getText(el).toLowerCase();
+                const text = getText(el);
+                const lower = text.toLowerCase();
 
                 if (!text) return false;
+                if (text.length > 250) return false;
 
-                return text === labelLower || text.includes(labelLower);
+                return lower === labelLower || lower.includes(labelLower);
             });
 
             for (const node of labelNodes) {
-                const ownText = getText(node);
-                const ownPrice = extractPrice(ownText);
+                const nodeText = getText(node);
 
-                if (ownPrice && !ownText.toLowerCase().includes('обеспечение')) {
+                // 1. Label və qiymət eyni elementdədirsə,
+                // yalnız label-dən sonrakı hissədən qiymət götür.
+                const ownPrice = extractPriceAfterLabel(nodeText, label);
+
+                if (ownPrice) {
                     return {
                         priceText: ownPrice,
-                        sourceText: ownText,
-                        method: 'own_text'
+                        sourceText: nodeText,
+                        method: 'own_text_after_label'
                     };
                 }
 
+                // 2. Screenshot-dakı əsas hal:
+                // parent direct children:
+                // [Начальная цена] [4 486 160,01 RUB]
                 let parent = node.parentElement;
 
-                for (let level = 0; level < 6 && parent; level++) {
+                for (let level = 0; level < 8 && parent; level++) {
+                    if (!isVisible(parent)) {
+                        parent = parent.parentElement;
+                        continue;
+                    }
+
+                    const children = directChildrenText(parent);
                     const parentText = getText(parent);
 
+                    const labelChildIndex = children.findIndex(text => {
+                        const lower = text.toLowerCase();
+
+                        return lower === labelLower || lower.includes(labelLower);
+                    });
+
+                    if (labelChildIndex !== -1) {
+                        for (let i = labelChildIndex + 1; i < children.length; i++) {
+                            const candidate = children[i];
+                            const candidateLower = candidate.toLowerCase();
+
+                            if (
+                                badWords.some(word =>
+                                    candidateLower.includes(word.toLowerCase())
+                                )
+                            ) {
+                                break;
+                            }
+
+                            const price = extractPrice(candidate);
+
+                            if (price) {
+                                return {
+                                    priceText: price,
+                                    sourceText: parentText,
+                                    method: 'parent_direct_child_after_label'
+                                };
+                            }
+                        }
+                    }
+
+                    // 3. Parent text-də label və qiymət birlikdədirsə,
+                    // yenə yalnız label-dən sonrakı hissədən oxu.
                     if (
                         parentText.toLowerCase().includes(labelLower) &&
-                        parentText.length < 800
+                        parentText.length < 1200
                     ) {
-                        const price = extractPrice(parentText);
+                        const price = extractPriceAfterLabel(parentText, label);
 
                         if (price) {
                             return {
                                 priceText: price,
                                 sourceText: parentText,
-                                method: 'parent_text'
+                                method: 'parent_text_after_label'
                             };
                         }
                     }
@@ -770,21 +894,36 @@ def extract_price_from_detail_page(detail_page):
                     parent = parent.parentElement;
                 }
 
+                // 4. Label-in sibling-lərində qiymət varsa.
                 let current = node;
 
-                for (let level = 0; level < 5 && current; level++) {
+                for (let level = 0; level < 6 && current; level++) {
                     let sibling = current.nextElementSibling;
 
-                    for (let i = 0; i < 6 && sibling; i++) {
-                        const siblingText = getText(sibling);
-                        const price = extractPrice(siblingText);
+                    for (let i = 0; i < 8 && sibling; i++) {
+                        if (!isVisible(sibling)) {
+                            sibling = sibling.nextElementSibling;
+                            continue;
+                        }
 
-                        if (price) {
-                            return {
-                                priceText: price,
-                                sourceText: siblingText,
-                                method: 'next_sibling'
-                            };
+                        const siblingText = getText(sibling);
+                        const siblingLower = siblingText.toLowerCase();
+
+                        if (
+                            siblingText &&
+                            !badWords.some(word =>
+                                siblingLower.includes(word.toLowerCase())
+                            )
+                        ) {
+                            const price = extractPrice(siblingText);
+
+                            if (price) {
+                                return {
+                                    priceText: price,
+                                    sourceText: siblingText,
+                                    method: 'next_sibling_price'
+                                };
+                            }
                         }
 
                         sibling = sibling.nextElementSibling;
@@ -825,7 +964,6 @@ def extract_price_from_detail_page(detail_page):
         return price_text, price_number
 
     return "", 0
-
 
 def get_title_from_detail_page(detail_page):
     body_text_before = safe_inner_text(detail_page.locator("body").first, timeout=10000)
