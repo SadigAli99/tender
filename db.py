@@ -404,6 +404,3 @@ def save_tender(tender):
 
     connection.commit()
     connection.close()
-
-    connection.commit()
-    connection.close()

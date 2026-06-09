@@ -14,6 +14,7 @@ from playwright.sync_api import sync_playwright
 from db import init_db, tender_exists, save_tender
 from detail_parser import parse_tender_detail
 from sources import ACTIVE_SOURCES
+from ai_translate import translate_tender_to_az
 
 
 load_dotenv()
@@ -122,16 +123,6 @@ def is_blocked_status(tender):
 def is_blocked_tender_type(tender):
     """
     44-ФЗ və 223-ФЗ tipli tenderləri bütün source-lar üçün bloklayır.
-
-    Seldon, Kontur və Rostender-də tip mətni fərqli formada gələ bilər:
-    - 44-ФЗ
-    - 223-ФЗ
-    - Закупка по 44-ФЗ
-    - Электронный аукцион 223-ФЗ
-    - Федеральный закон № 44-ФЗ
-
-    Ona görə yoxlama tender_type / purchase_type / type sahələri üzərindən
-    ümumi mətn axtarışı ilə aparılır.
     """
 
     tender_type = get_tender_type(tender)
@@ -160,15 +151,6 @@ def is_blocked_tender_type(tender):
 def get_rub_to_azn_rate():
     """
     CBAR tarixli XML-dən RUB -> AZN məzənnəsini götürür.
-
-    CBAR-da RUB belə verilir:
-    Nominal: 100
-    Value: məsələn 2.3795
-
-    Bu halda:
-    100 RUB = 2.3795 AZN
-    1 RUB = 2.3795 / 100 AZN
-
     Əgər bu gün üçün XML açılmasa, son 10 günə baxır.
     """
 
@@ -376,8 +358,8 @@ def get_tender_type(tender):
 
 def get_deadline(tender):
     return (
-        tender.get("application_end")
-        or tender.get("deadline")
+        tender.get("deadline")
+        or tender.get("application_end")
     )
 
 
@@ -392,12 +374,8 @@ def get_publish_date(tender):
 def normalize_hash_text(value):
     """
     Tender title üçün normalizasiya.
-    Məqsəd:
-    - « » kimi dırnaqları silmək
-    - tire fərqlərini aradan qaldırmaq
-    - artıq boşluqları təmizləmək
-    - source-lar arasında eyni başlıqları eyni formaya salmaq
     """
+
     if value is None:
         return ""
 
@@ -432,9 +410,6 @@ def make_tender_content_hash(tender):
 
     Əsas prinsip:
     normalized_title + price
-
-    Burada source, organization, publish_date, deadline, status, type istifadə olunmur.
-    Çünki bu dəyərlər fərqli source-larda fərqli gələ bilər.
     """
 
     title = normalize_hash_text(tender.get("title"))
@@ -454,21 +429,48 @@ def make_tender_content_hash(tender):
 
 
 def build_telegram_message(tender, rub_to_azn_rate):
-    title = tender.get("title")
-    title_links = tender.get("title_links", [])
+    translated_title = tender.get("translated_title")
+
+    title = translated_title or tender.get("title")
+
+    # Əgər title AI ilə tərcümə olunubsa, əvvəlki title_links artıq rus mətninə aid olacaq.
+    # Ona görə tərcümə olunmuş başlıqda clickable title tətbiq etmirik.
+    title_links = [] if translated_title else tender.get("title_links", [])
 
     organization = clean_value(
-        tender.get("organization")
+        tender.get("translated_organization")
+        or tender.get("organization")
         or tender.get("customer")
         or tender.get("company"),
         "Təşkilat yoxdur"
     )
 
     price = format_price_with_azn(tender.get("price"), rub_to_azn_rate)
-    tender_type = clean_value(get_tender_type(tender), "Tip yoxdur")
-    status = clean_value(tender.get("status"), "Status yoxdur")
-    deadline = clean_value(get_deadline(tender), "Son tarix yoxdur")
-    publish_date = clean_value(get_publish_date(tender), "Paylaşılma tarixi yoxdur")
+
+    tender_type = clean_value(
+        tender.get("translated_tender_type")
+        or get_tender_type(tender),
+        "Tip yoxdur"
+    )
+
+    status = clean_value(
+        tender.get("translated_status")
+        or tender.get("status"),
+        "Status yoxdur"
+    )
+
+    deadline = clean_value(
+        tender.get("translated_deadline")
+        or get_deadline(tender),
+        "Son tarix yoxdur"
+    )
+
+    publish_date = clean_value(
+        tender.get("translated_publish_date")
+        or get_publish_date(tender),
+        "Paylaşılma tarixi yoxdur"
+    )
+
     tender_url = clean_value(tender.get("url"), "Link yoxdur")
 
     title_icon = get_title_icon(tender.get("price"))
@@ -483,6 +485,8 @@ def build_telegram_message(tender, rub_to_azn_rate):
  - ⏰Son tarix : <b>{html.escape(deadline)}</b>
  - 📅Paylaşılma tarixi : <b>{html.escape(publish_date)}</b>
  - 🔗Link : <b>{html.escape(tender_url)}</b>"""
+
+    tender["translated_message"] = message
 
     return message
 
@@ -665,6 +669,8 @@ def main():
                         print("Content hash:", tender["content_hash"])
                         continue
 
+                    # Hazırda publish date filter söndürülüb.
+                    # Lazım olsa, aşağıdakı hissəni aktiv edə bilərsən.
                     # if is_old_publish_date(tender):
                     #     print("Keçildi, paylaşılma tarixi köhnədir və ya tapılmadı:")
                     #     print(tender["title"])
@@ -704,8 +710,11 @@ def main():
                         print("Minimum qiymət:", MIN_PRICE_RUB)
                         continue
 
+                    print("AI tərcümə işləyir:")
+                    tender = translate_tender_to_az(tender)
+
                     print("Telegram-a göndərilir:")
-                    print(tender["title"])
+                    print(tender.get("translated_title") or tender.get("title"))
                     print(tender["url"])
                     print("Qiymət:", tender.get("price"))
                     print("Oxunan qiymət:", parse_price_to_number(tender.get("price")))
@@ -723,11 +732,16 @@ def main():
                         print("DB-yə yazılacaq tender məlumatları:")
                         print("URL:", tender.get("url"))
                         print("Title:", tender.get("title"))
+                        print("Translated title:", tender.get("translated_title"))
                         print("Price:", tender.get("price"))
                         print("Deadline:", get_deadline(tender))
+                        print("Translated deadline:", tender.get("translated_deadline"))
                         print("Publish date:", get_publish_date(tender))
+                        print("Translated publish date:", tender.get("translated_publish_date"))
                         print("Tender type:", get_tender_type(tender))
+                        print("Translated tender type:", tender.get("translated_tender_type"))
                         print("Status:", tender.get("status"))
+                        print("Translated status:", tender.get("translated_status"))
                         print("Tender ID:", tender.get("tender_id"))
 
                         save_tender(tender)
