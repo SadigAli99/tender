@@ -720,6 +720,16 @@ def main():
                     sent = send_to_telegram(tender, rub_to_azn_rate)
 
                     if sent:
+                        print("DB-yə yazılacaq tender məlumatları:")
+                        print("URL:", tender.get("url"))
+                        print("Title:", tender.get("title"))
+                        print("Price:", tender.get("price"))
+                        print("Deadline:", get_deadline(tender))
+                        print("Publish date:", get_publish_date(tender))
+                        print("Tender type:", get_tender_type(tender))
+                        print("Status:", tender.get("status"))
+                        print("Tender ID:", tender.get("tender_id"))
+
                         save_tender(tender)
                         sent_count += 1
 
