@@ -7,3 +7,7 @@ __pycache__/
 tenders.db
 seldon_state.json
 seldon_storage_state.json
+test_seldon_login.py
+test_seldon_detail_after_login.py
+test_seldon_commercial.py
+debug/

@@ -10,8 +10,16 @@ BASE_URL = "https://win.myseldon.com"
 
 SELDON_GRID_URL = os.getenv(
     "SELDON_GRID_URL",
-    "https://win.myseldon.com/tender/grid/fz44"
+    "https://win.myseldon.com/tender/grid/commercial"
 )
+
+SELDON_LOGIN_URL = (
+    "https://account.myseldon.com/ru/account/login"
+    "?returnUrl=https%3A%2F%2Fwin.myseldon.com"
+)
+
+SELDON_LOGIN = os.getenv("SELDON_LOGIN", "").strip()
+SELDON_PASSWORD = os.getenv("SELDON_PASSWORD", "").strip()
 
 SELDON_MAX_PAGES = int(os.getenv("SELDON_MAX_PAGES", "1"))
 SELDON_MAX_ITEMS_PER_KEYWORD = int(os.getenv("SELDON_MAX_ITEMS_PER_KEYWORD", "10"))
@@ -110,7 +118,6 @@ PRICE_STOP_LABELS = [
     "Наименование",
     "Полное наименование",
 ]
-
 
 def clean_text(value):
     if not value:
@@ -243,6 +250,93 @@ def close_possible_modals(page):
         except Exception:
             pass
 
+def is_seldon_login_page(page):
+    try:
+        current_url = page.url.lower()
+
+        if "account.myseldon.com" in current_url:
+            return True
+
+        if page.locator("#Email").count() > 0:
+            return True
+
+    except Exception:
+        pass
+
+    return False
+
+
+def ensure_seldon_login(page):
+    if not SELDON_LOGIN or not SELDON_PASSWORD:
+        print("[SELDON] Login məlumatları yoxdur: SELDON_LOGIN / SELDON_PASSWORD")
+        return False
+
+    print("[SELDON] Login yoxlanılır...")
+
+    try:
+        page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
+
+        try:
+            page.wait_for_load_state("networkidle", timeout=25000)
+        except Exception:
+            pass
+
+        page.wait_for_timeout(2000)
+        close_possible_modals(page)
+
+        if not is_seldon_login_page(page) and "win.myseldon.com" in page.url:
+            print("[SELDON] Artıq login olunub.")
+            return True
+
+    except Exception as e:
+        print("[SELDON] Login check zamanı xəta:", e)
+
+    print("[SELDON] Login səhifəsi açılır...")
+
+    try:
+        page.goto(SELDON_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+
+        page.wait_for_selector("#Email", timeout=30000)
+        page.fill("#Email", SELDON_LOGIN)
+
+        page.wait_for_selector("#Password", timeout=30000)
+        page.fill("#Password", SELDON_PASSWORD)
+
+        print("[SELDON] Login formu dolduruldu, Войти klik olunur...")
+
+        try:
+            page.get_by_role(
+                "button",
+                name=re.compile("Войти", re.IGNORECASE),
+            ).click(timeout=10000)
+        except Exception:
+            page.locator(
+                "button:has-text('Войти'), input[type='submit']"
+            ).first.click(timeout=10000)
+
+        try:
+            page.wait_for_load_state("networkidle", timeout=30000)
+        except Exception:
+            pass
+
+        page.wait_for_timeout(3000)
+
+        print("[SELDON] Login sonrası URL:", page.url)
+
+        if is_seldon_login_page(page):
+            print("[SELDON] Login alınmadı: yenə login səhifəsindəyik.")
+            return False
+
+        if "win.myseldon.com" not in page.url:
+            print("[SELDON] Login sonrası gözlənilən domain deyil:", page.url)
+            return False
+
+        print("[SELDON] Login uğurludur.")
+        return True
+
+    except Exception as e:
+        print("[SELDON] Login error:", e)
+        return False
 
 def apply_real_seldon_filter(page, keyword):
     print("[SELDON] Filter düyməsi axtarılır...")
@@ -259,7 +353,29 @@ def apply_real_seldon_filter(page, keyword):
 
     print("[SELDON] Keyword yazıldı:", keyword)
 
-    price_input = page.locator('[data-testid="filter-start-price-input-range-0"]')
+    price_input = None
+
+    price_input_selectors = [
+        # commercial grid
+        '[data-testid="filter-purchase-start-price-input-range-0"]',
+
+        # old/fz44 variant
+        '[data-testid="filter-start-price-input-range-0"]',
+    ]
+
+    for selector in price_input_selectors:
+        try:
+            candidate = page.locator(selector).first
+            candidate.wait_for(state="visible", timeout=5000)
+            price_input = candidate
+            print("[SELDON] Qiymət input selector tapıldı:", selector)
+            break
+        except Exception:
+            continue
+
+    if not price_input:
+        raise Exception("Minimum qiymət input-u tapılmadı.")
+
     fill_input(price_input, str(MIN_PRICE_RUB))
 
     print("[SELDON] Minimum qiymət yazıldı:", MIN_PRICE_RUB)
@@ -682,6 +798,52 @@ def extract_price_from_detail_text(body_text):
 
     return "", 0
 
+def extract_organizer_from_detail_page(detail_page):
+    result = {
+        "organization": "",
+        "organization_inn": "",
+        "organization_phone": "",
+        "organization_email": "",
+        "contact_person": "",
+    }
+
+    mapping = {
+        "Наименование": "organization",
+        "ИНН": "organization_inn",
+        "Телефон": "organization_phone",
+        "Электронная почта": "organization_email",
+        "Контактное лицо": "contact_person",
+    }
+
+    try:
+        rows = detail_page.locator(
+            "xpath=//h3[normalize-space()='Организатор']"
+            "/following-sibling::div//div[@role='row']"
+        )
+
+        row_count = rows.count()
+
+        print("[SELDON] Organizer row count:", row_count)
+
+        for i in range(row_count):
+            row = rows.nth(i)
+            cells = row.locator("xpath=.//div[@role='cell']")
+
+            if cells.count() < 2:
+                continue
+
+            label = clean_text(cells.nth(0).inner_text(timeout=5000))
+            value = clean_text(cells.nth(1).inner_text(timeout=5000))
+
+            print(f"[SELDON] Organizer row: {label!r} => {value!r}")
+
+            if label in mapping:
+                result[mapping[label]] = value
+
+    except Exception as e:
+        print("[SELDON] Organizer DOM parse error:", e)
+
+    return result
 
 def extract_price_from_detail_page(detail_page):
     """
@@ -1154,15 +1316,20 @@ def parse_seldon_detail(page, grid_item, keyword):
         if not tender_type:
             tender_type = grid_tender_type
 
-        organization = extract_value_after_label_by_lines(
-            body_text,
-            [
-                "Организатор",
-                "Заказчик",
-                "Наименование заказчика",
-                "Покупатель",
-            ]
-        )
+        organizer_data = extract_organizer_from_detail_page(detail_page)
+
+        organization = clean_text(organizer_data.get("organization"))
+
+        if not organization:
+            organization = extract_value_after_label_by_lines(
+                body_text,
+                [
+                    "Организатор",
+                    "Заказчик",
+                    "Наименование заказчика",
+                    "Покупатель",
+                ]
+            )
 
         return {
             "source": SOURCE_NAME,
@@ -1177,6 +1344,10 @@ def parse_seldon_detail(page, grid_item, keyword):
             "tender_type": clean_text(tender_type) or "Yoxdur",
             "type": clean_text(tender_type) or "Yoxdur",
             "organization": clean_text(organization) or "Yoxdur",
+            "organization_inn": clean_text(organizer_data.get("organization_inn")) or "Yoxdur",
+            "organization_phone": clean_text(organizer_data.get("organization_phone")) or "Yoxdur",
+            "organization_email": clean_text(organizer_data.get("organization_email")) or "Yoxdur",
+            "contact_person": clean_text(organizer_data.get("contact_person")) or "Yoxdur",
             "customer": clean_text(organization) or "Yoxdur",
             "title_links": [],
         }
@@ -1199,6 +1370,10 @@ def search_seldon(page, keyword):
     print("[SELDON] Keyword:", keyword)
     print("[SELDON] Grid URL:", SELDON_GRID_URL)
 
+    if not ensure_seldon_login(page):
+        print("[SELDON] Login alınmadığı üçün source dayandırıldı.")
+        return results
+
     checked_urls = set()
 
     try:
@@ -1216,8 +1391,15 @@ def search_seldon(page, keyword):
             body_text = safe_inner_text(page.locator("body").first, timeout=10000)
 
             if "Войти" in body_text and "Государственные" not in body_text:
-                print("[SELDON] Login səhifəsi göründü. Bu source login olmadan işləməlidir.")
-                return results
+                print("[SELDON] Login səhifəsi göründü. Yenidən login yoxlanılır...")
+
+                if not ensure_seldon_login(page):
+                    print("[SELDON] Təkrar login alınmadı.")
+                    return results
+
+                page.goto(grid_url, wait_until="networkidle", timeout=60000)
+                page.wait_for_timeout(5000)
+                close_possible_modals(page)
 
             if page_number == 1:
                 apply_real_seldon_filter(page, keyword)
