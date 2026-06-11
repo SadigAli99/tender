@@ -119,12 +119,17 @@ def is_blocked_tender_type(tender):
     44-ФЗ və 223-ФЗ tipli tenderləri bütün source-lar üçün bloklayır.
     """
 
-    tender_type = get_tender_type(tender)
+    fields = [
+        tender.get("law_type"),
+        tender.get("law"),
+        tender.get("fz_type"),
+        tender.get("tender_type"),
+        tender.get("purchase_type"),
+        tender.get("type"),
+    ]
 
-    if not tender_type:
-        return False
-
-    tender_type = str(tender_type).lower().strip()
+    text = " ".join(str(value) for value in fields if value)
+    text = text.lower().replace("ё", "е")
 
     blocked_patterns = [
         "44-фз",
@@ -139,8 +144,7 @@ def is_blocked_tender_type(tender):
         "№ 223-фз",
     ]
 
-    return any(pattern in tender_type for pattern in blocked_patterns)
-
+    return any(pattern in text for pattern in blocked_patterns)
 def is_blocked_project_keyword(tender):
     """
     1C, Bitrix və oxşar platforma layihələrini bloklayır.
@@ -639,6 +643,14 @@ def main():
 
                     if not tender.get("url"):
                         print("Keçildi, URL yoxdur")
+                        continue
+
+                    if is_blocked_tender_type(tender):
+                        print("Keçildi, tender qanun tipi bloklanıb:")
+                        print(tender["title"])
+                        print(tender["url"])
+                        print("Law type:", tender.get("law_type"))
+                        print("Tip:", get_tender_type(tender))
                         continue
 
                     if tender_exists(tender_url=tender["url"]):

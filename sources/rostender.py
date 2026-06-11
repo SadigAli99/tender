@@ -223,18 +223,91 @@ def extract_tender_links(page, keyword="", seen_urls=None):
                 const result = [];
                 const anchors = Array.from(document.querySelectorAll('a[href]'));
 
+                function decodeHtml(value) {
+                    const div = document.createElement('div');
+                    div.innerHTML = value || '';
+                    return (div.textContent || div.innerText || value || '').trim();
+                }
+
+                function findTenderRow(a) {
+                    const selectors = [
+                        '.tender',
+                        '.tender-row',
+                        '.tender-item',
+                        '.search-results__item',
+                        '.list-item',
+                        'tr',
+                        '.row'
+                    ];
+
+                    for (const selector of selectors) {
+                        const row = a.closest(selector);
+                        if (row) {
+                            return row;
+                        }
+                    }
+
+                    return null;
+                }
+
+                function extractLawType(row) {
+                    if (!row) {
+                        return '';
+                    }
+
+                    const infoBlock = row.querySelector('.tender__infographics');
+
+                    if (!infoBlock) {
+                        return '';
+                    }
+
+                    const elements = Array.from(
+                        infoBlock.querySelectorAll('[data-title], [aria-label], [class]')
+                    );
+
+                    const rawText = elements
+                        .map(el => {
+                            return [
+                                el.getAttribute('data-title') || '',
+                                el.getAttribute('aria-label') || '',
+                                String(el.className || '')
+                            ].join(' ');
+                        })
+                        .join(' ');
+
+                    const text = decodeHtml(rawText)
+                        .toLowerCase()
+                        .replace(/\\u00a0/g, ' ')
+                        .replace(/ё/g, 'е');
+
+                    if (
+                        text.includes('b-223') ||
+                        /(^|[^0-9])223\\s*(?:-|–|—)?\\s*фз/.test(text)
+                    ) {
+                        return '223-ФЗ';
+                    }
+
+                    if (
+                        text.includes('b-44') ||
+                        /(^|[^0-9])44\\s*(?:-|–|—)?\\s*фз/.test(text)
+                    ) {
+                        return '44-ФЗ';
+                    }
+
+                    return '';
+                }
+
                 for (const a of anchors) {
                     const href = a.href || '';
                     const text = a.innerText || '';
 
-                    const row = a.closest(
-                        'tr, .tender-row, .tender-item, .tender, .search-results__item, .list-item, .row'
-                    );
+                    const row = findTenderRow(a);
 
                     result.push({
                         href: href,
                         text: text,
-                        rowText: row ? row.innerText : a.innerText
+                        rowText: row ? row.innerText : a.innerText,
+                        lawType: extractLawType(row)
                     });
                 }
 
@@ -251,6 +324,7 @@ def extract_tender_links(page, keyword="", seen_urls=None):
         href = item.get("href", "")
         text = item.get("text", "")
         row_text = item.get("rowText", "")
+        law_type = clean_text(item.get("lawType", ""))
 
         if not href:
             continue
@@ -290,6 +364,7 @@ def extract_tender_links(page, keyword="", seen_urls=None):
             "organization": None,
             "price": None,
             "tender_type": None,
+            "law_type": law_type,
             "status": None,
             "deadline": None,
             "publish_date": None,
