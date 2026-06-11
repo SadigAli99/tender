@@ -3,10 +3,11 @@ import re
 import html
 import time
 import hashlib
+import builtins
 import requests
 import xml.etree.ElementTree as ET
 
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
@@ -31,6 +32,20 @@ MIN_PUBLISH_DATE = date.today() - timedelta(days=3)
 
 # Son müraciət tarixi ən azı 3 gün sonra olmalıdır
 MIN_DEADLINE_DATE = date.today() + timedelta(days=3)
+
+_original_print = builtins.print
+
+
+def setup_timestamped_print():
+    def timestamped_print(*args, **kwargs):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        kwargs.setdefault("flush", True)
+        _original_print(f"[{timestamp}]", *args, **kwargs)
+
+    builtins.print = timestamped_print
+
+
+setup_timestamped_print()
 
 
 def clean_value(value, default="Yoxdur"):

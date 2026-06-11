@@ -277,19 +277,28 @@ def extract_tender_links(page, keyword="", seen_urls=None):
 
                     const text = decodeHtml(rawText)
                         .toLowerCase()
-                        .replace(/\\u00a0/g, ' ')
+                        .replace(/\u00a0/g, ' ')
                         .replace(/ё/g, 'е');
+
+                    // Bu tip tenderlər 44/223 deyil, ona görə bloklanmamalıdır
+                    if (
+                        text.includes('не регулируемые специальными законами') ||
+                        text.includes('не регулируется специальными законами') ||
+                        text.includes('не регулируемых специальными законами')
+                    ) {
+                        return '';
+                    }
 
                     if (
                         text.includes('b-223') ||
-                        /(^|[^0-9])223\\s*(?:-|–|—)?\\s*фз/.test(text)
+                        /(^|[^0-9])223\s*(?:-|–|—)?\s*фз/.test(text)
                     ) {
                         return '223-ФЗ';
                     }
 
                     if (
                         text.includes('b-44') ||
-                        /(^|[^0-9])44\\s*(?:-|–|—)?\\s*фз/.test(text)
+                        /(^|[^0-9])44\s*(?:-|–|—)?\s*фз/.test(text)
                     ) {
                         return '44-ФЗ';
                     }
