@@ -671,13 +671,13 @@ def main():
 
                     # Hazırda publish date filter söndürülüb.
                     # Lazım olsa, aşağıdakı hissəni aktiv edə bilərsən.
-                    # if is_old_publish_date(tender):
-                    #     print("Keçildi, paylaşılma tarixi köhnədir və ya tapılmadı:")
-                    #     print(tender["title"])
-                    #     print(tender["url"])
-                    #     print("Paylaşılma tarixi:", get_publish_date(tender))
-                    #     print("Minimum tarix:", MIN_PUBLISH_DATE.strftime("%d.%m.%Y"))
-                    #     continue
+                    if is_old_publish_date(tender):
+                        print("Keçildi, paylaşılma tarixi köhnədir və ya tapılmadı:")
+                        print(tender["title"])
+                        print(tender["url"])
+                        print("Paylaşılma tarixi:", get_publish_date(tender))
+                        print("Minimum tarix:", MIN_PUBLISH_DATE.strftime("%d.%m.%Y"))
+                        continue
 
                     if is_deadline_too_close_or_missing(tender):
                         print("Keçildi, son müraciət tarixi yaxındır və ya tapılmadı:")
