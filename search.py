@@ -16,7 +16,6 @@ from detail_parser import parse_tender_detail
 from sources import ACTIVE_SOURCES
 from ai_translate import translate_tender_to_az
 
-
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -67,9 +66,7 @@ def parse_date_from_text(value):
 
 def is_old_publish_date(tender):
     publish_date_text = (
-        tender.get("publish_date")
-        or tender.get("published_at")
-        or tender.get("date")
+        tender.get("publish_date") or tender.get("published_at") or tender.get("date")
     )
 
     publish_date = parse_date_from_text(publish_date_text)
@@ -82,10 +79,7 @@ def is_old_publish_date(tender):
 
 
 def is_deadline_too_close_or_missing(tender):
-    deadline_text = (
-        tender.get("application_end")
-        or tender.get("deadline")
-    )
+    deadline_text = tender.get("application_end") or tender.get("deadline")
 
     deadline_date = parse_date_from_text(deadline_text)
 
@@ -114,7 +108,7 @@ def is_blocked_status(tender):
         "завершён",
         "завершен",
         "завершена",
-        "завершено"
+        "завершено",
     ]
 
     return any(word in status for word in blocked_words)
@@ -147,6 +141,34 @@ def is_blocked_tender_type(tender):
 
     return any(pattern in tender_type for pattern in blocked_patterns)
 
+def is_blocked_project_keyword(tender):
+    """
+    1C, Bitrix və oxşar platforma layihələrini bloklayır.
+    Bu tenderlər nə Telegram-a göndərilir, nə də DB-yə yazılır.
+    """
+
+    fields = [
+        tender.get("title"),
+        tender.get("organization"),
+        tender.get("customer"),
+        tender.get("company"),
+        tender.get("tender_type"),
+        tender.get("purchase_type"),
+        tender.get("type"),
+    ]
+
+    text = " ".join(str(value) for value in fields if value)
+    text = text.lower().replace("ё", "е")
+
+    blocked_patterns = [
+        r"(?<![a-zа-я0-9])1\s*[-]?\s*[cс](?![a-zа-я0-9])",
+        r"битрикс",
+        r"bitrix",
+        r"битрикс24",
+        r"bitrix24",
+    ]
+
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in blocked_patterns)
 
 def get_rub_to_azn_rate():
     """
@@ -170,8 +192,8 @@ def get_rub_to_azn_rate():
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
                         "Chrome/148.0.0.0 Safari/537.36"
                     ),
-                    "Accept": "application/xml,text/xml,*/*"
-                }
+                    "Accept": "application/xml,text/xml,*/*",
+                },
             )
 
             if response.status_code != 200:
@@ -232,7 +254,7 @@ def parse_price_to_number(price_text):
         "yoxdur",
         "qiymət yoxdur",
         "none",
-        "-"
+        "-",
     ]
 
     if any(word in text for word in no_price_words):
@@ -273,19 +295,26 @@ def format_number(value):
         return str(value)
 
 
+def format_money_dot(value, decimals=0):
+    if decimals == 2:
+        return f"{value:,.2f}".replace(",", " ").replace(".", ",").replace(" ", ".")
+
+    return f"{round(value):,}".replace(",", ".")
+
+
 def format_price_with_azn(price_text, rub_to_azn_rate):
     price_number = parse_price_to_number(price_text)
 
     if price_number <= 0:
         return clean_value(price_text, "Qiymət yoxdur")
 
-    rub_text = f"{format_number(price_number)} ₽"
+    rub_text = f"{format_money_dot(price_number, decimals=2)} ₽"
 
     if rub_to_azn_rate is None:
         return rub_text
 
     azn_value = price_number * rub_to_azn_rate
-    azn_text = f"{round(azn_value)} AZN"
+    azn_text = f"{format_money_dot(azn_value)} AZN"
 
     return f"{rub_text} ({azn_text})"
 
@@ -341,8 +370,7 @@ def make_title_clickable(title, title_links=None):
         escaped_url = html.escape(str(url), quote=True)
 
         escaped_title = escaped_title.replace(
-            escaped_text,
-            f'<a href="{escaped_url}">{escaped_text}</a>'
+            escaped_text, f'<a href="{escaped_url}">{escaped_text}</a>'
         )
 
     return escaped_title
@@ -350,24 +378,17 @@ def make_title_clickable(title, title_links=None):
 
 def get_tender_type(tender):
     return (
-        tender.get("tender_type")
-        or tender.get("purchase_type")
-        or tender.get("type")
+        tender.get("tender_type") or tender.get("purchase_type") or tender.get("type")
     )
 
 
 def get_deadline(tender):
-    return (
-        tender.get("deadline")
-        or tender.get("application_end")
-    )
+    return tender.get("deadline") or tender.get("application_end")
 
 
 def get_publish_date(tender):
     return (
-        tender.get("publish_date")
-        or tender.get("published_at")
-        or tender.get("date")
+        tender.get("publish_date") or tender.get("published_at") or tender.get("date")
     )
 
 
@@ -420,10 +441,7 @@ def make_tender_content_hash(tender):
     if not title or not price:
         return ""
 
-    raw_text = "|".join([
-        title,
-        price
-    ])
+    raw_text = "|".join([title, price])
 
     return hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
 
@@ -442,33 +460,26 @@ def build_telegram_message(tender, rub_to_azn_rate):
         or tender.get("organization")
         or tender.get("customer")
         or tender.get("company"),
-        "Təşkilat yoxdur"
+        "Təşkilat yoxdur",
     )
 
     price = format_price_with_azn(tender.get("price"), rub_to_azn_rate)
 
     tender_type = clean_value(
-        tender.get("translated_tender_type")
-        or get_tender_type(tender),
-        "Tip yoxdur"
+        tender.get("translated_tender_type") or get_tender_type(tender), "Tip yoxdur"
     )
 
     status = clean_value(
-        tender.get("translated_status")
-        or tender.get("status"),
-        "Status yoxdur"
+        tender.get("translated_status") or tender.get("status"), "Status yoxdur"
     )
 
     deadline = clean_value(
-        tender.get("translated_deadline")
-        or get_deadline(tender),
-        "Son tarix yoxdur"
+        tender.get("translated_deadline") or get_deadline(tender), "Son tarix yoxdur"
     )
 
     publish_date = clean_value(
-        tender.get("translated_publish_date")
-        or get_publish_date(tender),
-        "Paylaşılma tarixi yoxdur"
+        tender.get("translated_publish_date") or get_publish_date(tender),
+        "Paylaşılma tarixi yoxdur",
     )
 
     tender_url = clean_value(tender.get("url"), "Link yoxdur")
@@ -502,9 +513,9 @@ def send_to_telegram(tender, rub_to_azn_rate):
             "chat_id": CHANNEL_ID,
             "text": message,
             "parse_mode": "HTML",
-            "disable_web_page_preview": True
+            "disable_web_page_preview": True,
         },
-        timeout=30
+        timeout=30,
     )
 
     print("Telegram status:", response.status_code)
@@ -536,26 +547,17 @@ def normalize_tender(tender, source_name, keyword):
     tender["url"] = tender.get("url") or ""
 
     tender["organization"] = (
-        tender.get("organization")
-        or tender.get("customer")
-        or tender.get("company")
+        tender.get("organization") or tender.get("customer") or tender.get("company")
     )
 
     tender["tender_type"] = (
-        tender.get("tender_type")
-        or tender.get("purchase_type")
-        or tender.get("type")
+        tender.get("tender_type") or tender.get("purchase_type") or tender.get("type")
     )
 
-    tender["deadline"] = (
-        tender.get("deadline")
-        or tender.get("application_end")
-    )
+    tender["deadline"] = tender.get("deadline") or tender.get("application_end")
 
     tender["publish_date"] = (
-        tender.get("publish_date")
-        or tender.get("published_at")
-        or tender.get("date")
+        tender.get("publish_date") or tender.get("published_at") or tender.get("date")
     )
 
     if "title_links" not in tender or tender["title_links"] is None:
@@ -589,7 +591,7 @@ def main():
                 "--disable-dev-shm-usage",
                 "--disable-http2",
                 "--ignore-certificate-errors",
-            ]
+            ],
         )
 
         context = browser.new_context(
@@ -660,6 +662,13 @@ def main():
                         except Exception:
                             pass
 
+                    if is_blocked_project_keyword(tender):
+                        print("Keçildi, 1C / Bitrix tipli layihədir:")
+                        print(tender["title"])
+                        print(tender["url"])
+                        print("Tip:", get_tender_type(tender))
+                        continue
+
                     tender["content_hash"] = make_tender_content_hash(tender)
 
                     if tender_exists(content_hash=tender["content_hash"]):
@@ -684,7 +693,9 @@ def main():
                         print(tender["title"])
                         print(tender["url"])
                         print("Son tarix:", get_deadline(tender))
-                        print("Minimum son tarix:", MIN_DEADLINE_DATE.strftime("%d.%m.%Y"))
+                        print(
+                            "Minimum son tarix:", MIN_DEADLINE_DATE.strftime("%d.%m.%Y")
+                        )
                         continue
 
                     if is_blocked_status(tender):
@@ -701,12 +712,18 @@ def main():
                         print("Tip:", get_tender_type(tender))
                         continue
 
+
+
                     if is_price_below_minimum(tender):
-                        print("Keçildi, qiymət 450k RUB-dan aşağıdır və ya qiymət tapılmadı:")
+                        print(
+                            "Keçildi, qiymət 450k RUB-dan aşağıdır və ya qiymət tapılmadı:"
+                        )
                         print(tender["title"])
                         print(tender["url"])
                         print("Qiymət:", tender.get("price"))
-                        print("Oxunan qiymət:", parse_price_to_number(tender.get("price")))
+                        print(
+                            "Oxunan qiymət:", parse_price_to_number(tender.get("price"))
+                        )
                         print("Minimum qiymət:", MIN_PRICE_RUB)
                         continue
 
@@ -723,7 +740,8 @@ def main():
                     if rub_to_azn_rate is not None:
                         print(
                             "AZN ekvivalenti:",
-                            parse_price_to_number(tender.get("price")) * rub_to_azn_rate
+                            parse_price_to_number(tender.get("price"))
+                            * rub_to_azn_rate,
                         )
 
                     sent = send_to_telegram(tender, rub_to_azn_rate)
@@ -737,9 +755,15 @@ def main():
                         print("Deadline:", get_deadline(tender))
                         print("Translated deadline:", tender.get("translated_deadline"))
                         print("Publish date:", get_publish_date(tender))
-                        print("Translated publish date:", tender.get("translated_publish_date"))
+                        print(
+                            "Translated publish date:",
+                            tender.get("translated_publish_date"),
+                        )
                         print("Tender type:", get_tender_type(tender))
-                        print("Translated tender type:", tender.get("translated_tender_type"))
+                        print(
+                            "Translated tender type:",
+                            tender.get("translated_tender_type"),
+                        )
                         print("Status:", tender.get("status"))
                         print("Translated status:", tender.get("translated_status"))
                         print("Tender ID:", tender.get("tender_id"))
