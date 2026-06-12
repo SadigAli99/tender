@@ -216,6 +216,21 @@ def init_db():
             content_hash TEXT,
             normalized_title TEXT,
             price_rub TEXT,
+            price_text TEXT,
+            deadline_text TEXT,
+            deadline_date TEXT,
+            publish_date_text TEXT,
+            publish_date TEXT,
+            tender_type TEXT,
+            status TEXT,
+            tender_id TEXT,
+            title_hash TEXT,
+            customer TEXT,
+            organization TEXT,
+            organization_inn TEXT,
+            organization_phone TEXT,
+            organization_email TEXT,
+            contact_person TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -234,6 +249,13 @@ def init_db():
     add_column_if_missing(cursor, "sent_tenders", "status", "TEXT")
     add_column_if_missing(cursor, "sent_tenders", "tender_id", "TEXT")
     add_column_if_missing(cursor, "sent_tenders", "title_hash", "TEXT")
+
+    add_column_if_missing(cursor, "sent_tenders", "customer", "TEXT")
+    add_column_if_missing(cursor, "sent_tenders", "organization", "TEXT")
+    add_column_if_missing(cursor, "sent_tenders", "organization_inn", "TEXT")
+    add_column_if_missing(cursor, "sent_tenders", "organization_phone", "TEXT")
+    add_column_if_missing(cursor, "sent_tenders", "organization_email", "TEXT")
+    add_column_if_missing(cursor, "sent_tenders", "contact_person", "TEXT")
 
     cursor.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_sent_tenders_content_hash
@@ -331,6 +353,13 @@ def save_tender(tender):
 
     tender_id = tender.get("tender_id")
 
+    customer = tender.get("customer", "")
+    organization = tender.get("organization", "")
+    organization_inn = tender.get("organization_inn", "")
+    organization_phone = tender.get("organization_phone", "")
+    organization_email = tender.get("organization_email", "")
+    contact_person = tender.get("contact_person", "")
+
     cursor.execute("""
         INSERT OR IGNORE INTO sent_tenders (
             tender_url,
@@ -348,9 +377,15 @@ def save_tender(tender):
             tender_type,
             status,
             tender_id,
-            title_hash
+            title_hash,
+            customer,
+            organization,
+            organization_inn,
+            organization_phone,
+            organization_email,
+            contact_person
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         tender.get("url", ""),
         title,
@@ -367,7 +402,13 @@ def save_tender(tender):
         tender_type,
         status,
         tender_id,
-        title_hash
+        title_hash,
+        customer,
+        organization,
+        organization_inn,
+        organization_phone,
+        organization_email,
+        contact_person
     ))
 
     cursor.execute("""
@@ -384,7 +425,13 @@ def save_tender(tender):
             tender_id = ?,
             title_hash = ?,
             normalized_title = ?,
-            content_hash = ?
+            content_hash = ?,
+            customer = ?,
+            organization = ?,
+            organization_inn = ?,
+            organization_phone = ?,
+            organization_email = ?,
+            contact_person = ?
         WHERE tender_url = ?
     """, (
         price_text,
@@ -399,6 +446,12 @@ def save_tender(tender):
         title_hash,
         normalized_title,
         content_hash,
+        customer,
+        organization,
+        organization_inn,
+        organization_phone,
+        organization_email,
+        contact_person,
         tender.get("url", "")
     ))
 

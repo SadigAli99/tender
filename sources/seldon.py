@@ -4,6 +4,10 @@ import time
 from datetime import date, timedelta
 from urllib.parse import urljoin
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 SOURCE_NAME = "win.myseldon.com"
 BASE_URL = "https://win.myseldon.com"
@@ -26,6 +30,8 @@ SELDON_MAX_ITEMS_PER_KEYWORD = int(os.getenv("SELDON_MAX_ITEMS_PER_KEYWORD", "10
 
 MIN_PRICE_RUB = int(os.getenv("MIN_PRICE_RUB", "450000"))
 MIN_DEADLINE_DATE = date.today() + timedelta(days=3)
+
+DEBUG_SELDON = os.getenv("DEBUG_SELDON", "0") == "1"
 
 
 EXCLUDED_TITLE_WORDS = [
@@ -119,6 +125,39 @@ PRICE_STOP_LABELS = [
     "Полное наименование",
 ]
 
+
+ORGANIZER_FIELD_LABELS = [
+    "Организатор",
+    "Заказчик",
+    "Наименование",
+    "Краткое наименование",
+    "Полное наименование",
+    "Регион",
+    "ИНН",
+    "Телефон",
+    "Электронная почта",
+    "Контактное лицо",
+    "Источник",
+    "Начальная цена",
+    "НМЦК",
+    "Статус",
+    "Осталось дней",
+    "Начало приема заявок",
+    "Окончание приема заявок",
+    "Окончание приёма заявок",
+    "Способ закупки",
+    "Тип закупки",
+    "Общие сведения",
+    "Лоты",
+    "Документы",
+]
+
+
+# -----------------------------------------------------------------------------
+# Common helpers
+# -----------------------------------------------------------------------------
+
+
 def clean_text(value):
     if not value:
         return ""
@@ -128,6 +167,206 @@ def clean_text(value):
     value = re.sub(r"\s+", " ", value)
 
     return value.strip()
+
+
+def clean_multiline_text(value):
+    """
+    Body text üçün istifadə olunur.
+    clean_text-dən fərqi: \n saxlanılır ki, line-based parser label/value bloklarını görə bilsin.
+    """
+    if not value:
+        return ""
+
+    value = str(value).replace("\xa0", " ")
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+
+    lines = []
+
+    for line in value.split("\n"):
+        line = re.sub(r"[ \t]+", " ", line).strip()
+
+        if line:
+            lines.append(line)
+
+    return "\n".join(lines).strip()
+
+
+def is_masked_text(value):
+    if not value:
+        return False
+
+    text = clean_text(value).strip('"').strip("'").strip()
+
+    if not text:
+        return False
+
+    masked_chars = ["▒", "█", "■", "*", "•"]
+    masked_count = sum(text.count(ch) for ch in masked_chars)
+
+    return masked_count >= 5 and masked_count / max(len(text), 1) > 0.3
+
+
+def clear_if_masked(value):
+    value = clean_text(value)
+
+    if is_masked_text(value):
+        return ""
+
+    return value
+
+
+def is_region_value(value):
+    value = clean_text(value).lower()
+
+    if not value:
+        return False
+
+    if re.search(r"\b\d{1,3}\s*регион\b", value):
+        return True
+
+    region_words = [
+        "область",
+        "край",
+        "республика",
+        "автономный округ",
+        "город",
+        "район",
+        "регион",
+        "москва",
+        "санкт-петербург",
+        "севастополь",
+    ]
+
+    return any(word in value for word in region_words)
+
+
+def looks_like_organization_name(value):
+    value = clean_text(value)
+
+    if not value:
+        return False
+
+    if is_masked_text(value):
+        return False
+
+    if is_region_value(value):
+        return False
+
+    lowered = value.lower()
+
+    markers = [
+        "акционерное общество",
+        "ао ",
+        " ао",
+        "общество с ограниченной ответственностью",
+        "ооо ",
+        " ооо",
+        "публичное акционерное общество",
+        "пао ",
+        " пао",
+        "муниципальное",
+        "государственное",
+        "федеральное",
+        "казенное",
+        "бюджетное",
+        "автономное",
+        "учреждение",
+        "предприятие",
+        "компания",
+    ]
+
+    if any(marker in lowered for marker in markers):
+        return True
+
+    # Seldon-da təşkilat adları çox vaxt tam böyük hərflə gəlir.
+    if len(value) > 10 and value.upper() == value:
+        return True
+
+    return False
+
+
+def normalize_organization_value(value):
+    value = clear_if_masked(value)
+
+    if not value:
+        return ""
+
+    if is_region_value(value):
+        return ""
+
+    if not looks_like_organization_name(value):
+        return ""
+
+    return value
+
+
+def extract_organization_from_title(title):
+    """
+    Son fallback. Seldon DOM company blokunu verməsə, title içindəki
+    "АО ..." hissəsini ən azı organization kimi çıxarır.
+    """
+    title = clean_text(title)
+
+    if not title:
+        return ""
+
+    patterns = [
+        r"\bАО\s+[А-ЯЁA-Z0-9][А-ЯЁA-Zа-яёa-z0-9\-\s\.\"«»]+",
+        r"\bПАО\s+[А-ЯЁA-Z0-9][А-ЯЁA-Zа-яёa-z0-9\-\s\.\"«»]+",
+        r"\bООО\s+[А-ЯЁA-Z0-9][А-ЯЁA-Zа-яёa-z0-9\-\s\.\"«»]+",
+    ]
+
+    stop_words = [
+        " по ",
+        " для ",
+        " на ",
+        " при ",
+        " в ",
+        " и ",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, title)
+
+        if not match:
+            continue
+
+        value = clean_text(match.group(0))
+
+        # Title-in sonundakı qalan sözləri çox uzatmamaq üçün
+        # stop sözlərindən əvvəl kəsirik.
+        lowered = " " + value.lower() + " "
+        cut_at = None
+
+        for stop_word in stop_words:
+            index = lowered.find(stop_word, 4)
+
+            if index != -1:
+                cut_at = index
+                break
+
+        if cut_at:
+            value = clean_text(value[:cut_at - 1])
+
+        value = value.strip(" .,-;:")
+
+        if normalize_organization_value(value):
+            return value
+
+    return ""
+
+
+def clean_deadline_text(value):
+    value = clean_text(value)
+
+    if not value:
+        return ""
+
+    # Seldon bəzən deadline ilə yanaşı "Осталось 3 дня" yazısını da verir.
+    value = re.sub(r"\s+Осталось\s+.*$", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s+Остался\s+.*$", "", value, flags=re.IGNORECASE)
+
+    return clean_text(value)
 
 
 def split_lines(value):
@@ -146,6 +385,13 @@ def split_lines(value):
 def safe_inner_text(locator, timeout=5000):
     try:
         return clean_text(locator.inner_text(timeout=timeout))
+    except Exception:
+        return ""
+
+
+def safe_inner_text_multiline(locator, timeout=5000):
+    try:
+        return clean_multiline_text(locator.inner_text(timeout=timeout))
     except Exception:
         return ""
 
@@ -229,6 +475,96 @@ def is_title_excluded(title):
     return False
 
 
+def is_organizer_field_label(value):
+    value = clean_text(value).lower()
+
+    if not value:
+        return False
+
+    for label in ORGANIZER_FIELD_LABELS:
+        label_lower = label.lower()
+
+        if value == label_lower:
+            return True
+
+        if value.startswith(label_lower + ":"):
+            return True
+
+    return False
+
+
+def strip_inline_label_value(line, label):
+    line = clean_text(line)
+    label = clean_text(label)
+
+    if not line or not label:
+        return ""
+
+    lowered = line.lower()
+    label_lower = label.lower()
+
+    if lowered == label_lower:
+        return ""
+
+    if lowered.startswith(label_lower + ":"):
+        return clean_text(line[len(label) + 1:])
+
+    if lowered.startswith(label_lower + " "):
+        return clean_text(line[len(label):])
+
+    return ""
+
+
+def next_non_label_value(lines, start_index, max_lookahead=10, organization_mode=False):
+    for line in lines[start_index:start_index + max_lookahead]:
+        value = clean_text(line)
+
+        if not value:
+            continue
+
+        if is_masked_text(value):
+            continue
+
+        if is_organizer_field_label(value):
+            continue
+
+        for inline_label in [
+            "Наименование",
+            "ИНН",
+            "Телефон",
+            "Электронная почта",
+            "Контактное лицо",
+        ]:
+            inline_value = strip_inline_label_value(value, inline_label)
+
+            if inline_value:
+                if organization_mode and inline_label == "Наименование":
+                    org_value = normalize_organization_value(inline_value)
+
+                    if org_value:
+                        return org_value
+
+                    continue
+
+                if not organization_mode:
+                    return inline_value
+
+        if value.lower() in ["текущая", "коммерческая"]:
+            continue
+
+        if organization_mode:
+            org_value = normalize_organization_value(value)
+
+            if org_value:
+                return org_value
+
+            continue
+
+        return value
+
+    return ""
+
+
 def fill_input(locator, value):
     locator.click(timeout=10000)
     locator.press("Control+A")
@@ -250,6 +586,12 @@ def close_possible_modals(page):
         except Exception:
             pass
 
+
+# -----------------------------------------------------------------------------
+# Login
+# -----------------------------------------------------------------------------
+
+
 def is_seldon_login_page(page):
     try:
         current_url = page.url.lower()
@@ -264,6 +606,21 @@ def is_seldon_login_page(page):
         pass
 
     return False
+
+
+def body_looks_like_login_page(body_text):
+    body_text = clean_text(body_text)
+
+    if not body_text:
+        return False
+
+    login_markers = [
+        "Электронная почта/Телефон",
+        "Пароль",
+        "Войти",
+    ]
+
+    return all(marker in body_text for marker in login_markers)
 
 
 def ensure_seldon_login(page):
@@ -338,6 +695,12 @@ def ensure_seldon_login(page):
         print("[SELDON] Login error:", e)
         return False
 
+
+# -----------------------------------------------------------------------------
+# Grid filter and grid parsing
+# -----------------------------------------------------------------------------
+
+
 def apply_real_seldon_filter(page, keyword):
     print("[SELDON] Filter düyməsi axtarılır...")
 
@@ -356,10 +719,7 @@ def apply_real_seldon_filter(page, keyword):
     price_input = None
 
     price_input_selectors = [
-        # commercial grid
         '[data-testid="filter-purchase-start-price-input-range-0"]',
-
-        # old/fz44 variant
         '[data-testid="filter-start-price-input-range-0"]',
     ]
 
@@ -423,7 +783,7 @@ def extract_grid_row_info_from_anchor(anchor):
             node => {
                 function visibleText(el) {
                     if (!el) return "";
-                    return (el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim();
+                    return (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
                 }
 
                 function findRow(el) {
@@ -438,8 +798,8 @@ def extract_grid_row_info_from_anchor(anchor):
 
                         const rowText = visibleText(current);
 
-                        const hasDates = /\\d{2}\\.\\d{2}\\.\\d{4}\\s+\\d{2}:\\d{2}/.test(rowText);
-                        const hasPrice = /\\d{1,3}(?:\\s\\d{3})+,\\d{2}/.test(rowText);
+                        const hasDates = /\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}/.test(rowText);
+                        const hasPrice = /\d{1,3}(?:\s\d{3})+,\d{2}/.test(rowText);
                         const hasManyCells = cells.length >= 8;
 
                         if (hasManyCells && hasDates && hasPrice) {
@@ -659,6 +1019,11 @@ def extract_grid_items(page):
     return items
 
 
+# -----------------------------------------------------------------------------
+# Detail parsing helpers
+# -----------------------------------------------------------------------------
+
+
 def extract_value_after_label_by_lines(text, labels, stop_labels=None):
     lines = split_lines(text)
 
@@ -699,6 +1064,9 @@ def extract_value_after_label_by_lines(text, labels, stop_labels=None):
                     if any(next_lower.startswith(stop) for stop in stop_lower):
                         break
 
+                    if is_masked_text(next_line):
+                        continue
+
                     collected.append(next_line)
 
                     if len(" ".join(collected)) > 80:
@@ -707,7 +1075,12 @@ def extract_value_after_label_by_lines(text, labels, stop_labels=None):
                 return clean_text(" ".join(collected))
 
             if lowered.startswith(label + ":"):
-                return clean_text(line.split(":", 1)[1])
+                value = clean_text(line.split(":", 1)[1])
+
+                if is_masked_text(value):
+                    return ""
+
+                return value
 
     return ""
 
@@ -798,7 +1171,8 @@ def extract_price_from_detail_text(body_text):
 
     return "", 0
 
-def extract_organizer_from_detail_page(detail_page):
+
+def extract_organizer_from_body_text(body_text):
     result = {
         "organization": "",
         "organization_inn": "",
@@ -807,61 +1181,491 @@ def extract_organizer_from_detail_page(detail_page):
         "contact_person": "",
     }
 
-    mapping = {
-        "Наименование": "organization",
-        "ИНН": "organization_inn",
-        "Телефон": "organization_phone",
-        "Электронная почта": "organization_email",
-        "Контактное лицо": "contact_person",
+    lines = split_lines(body_text)
+
+    if not lines:
+        return result
+
+    # 1. Detail blok:
+    # Организатор
+    # Наименование
+    # АКЦИОНЕРНОЕ ОБЩЕСТВО ...
+    # Регион
+    # ...
+    # ИНН
+    # ...
+    for index, line in enumerate(lines):
+        if clean_text(line).lower() != "организатор":
+            continue
+
+        block_end = min(index + 100, len(lines))
+        block = lines[index:block_end]
+
+        if not any(clean_text(x).lower() == "наименование" for x in block):
+            continue
+
+        for i in range(index + 1, block_end):
+            label = clean_text(lines[i]).lower()
+
+            if label == "наименование" and not result["organization"]:
+                result["organization"] = next_non_label_value(
+                    lines,
+                    i + 1,
+                    max_lookahead=10,
+                    organization_mode=True,
+                )
+
+            elif label == "инн" and not result["organization_inn"]:
+                inn = next_non_label_value(lines, i + 1, max_lookahead=5)
+
+                if re.search(r"\d{10,12}", inn):
+                    result["organization_inn"] = re.search(r"\d{10,12}", inn).group(0)
+
+            elif label == "телефон" and not result["organization_phone"]:
+                result["organization_phone"] = next_non_label_value(lines, i + 1, max_lookahead=5)
+
+            elif label == "электронная почта" and not result["organization_email"]:
+                result["organization_email"] = next_non_label_value(lines, i + 1, max_lookahead=5)
+
+            elif label == "контактное лицо" and not result["contact_person"]:
+                result["contact_person"] = next_non_label_value(lines, i + 1, max_lookahead=5)
+
+        if result["organization"] or result["organization_inn"]:
+            break
+
+    # 2. Header fallback:
+    # Начальная цена
+    # 499 000,00 RUB
+    # Организатор
+    # АКЦИОНЕРНОЕ ОБЩЕСТВО ...
+    # Источник
+    if not result["organization"]:
+        for index, line in enumerate(lines):
+            if clean_text(line).lower() == "организатор":
+                candidate = next_non_label_value(
+                    lines,
+                    index + 1,
+                    max_lookahead=12,
+                    organization_mode=True,
+                )
+
+                if candidate:
+                    result["organization"] = candidate
+                    break
+
+    # 3. Ümumi INN fallback
+    if not result["organization_inn"]:
+        for index, line in enumerate(lines):
+            if clean_text(line).lower() == "инн":
+                inn = next_non_label_value(lines, index + 1, max_lookahead=5)
+
+                if re.search(r"\d{10,12}", inn):
+                    result["organization_inn"] = re.search(r"\d{10,12}", inn).group(0)
+                    break
+
+    for key in list(result.keys()):
+        result[key] = clear_if_masked(result[key])
+
+    result["organization"] = normalize_organization_value(result.get("organization"))
+
+    return result
+
+
+def merge_organizer_data(primary, fallback):
+    result = dict(primary or {})
+
+    for key, value in (fallback or {}).items():
+        current = clear_if_masked(result.get(key))
+        new_value = clear_if_masked(value)
+
+        if key == "organization":
+            current = normalize_organization_value(current)
+            new_value = normalize_organization_value(new_value)
+
+        if not current and new_value:
+            result[key] = new_value
+        else:
+            result[key] = current
+
+    return result
+
+
+def extract_organizer_from_detail_page(detail_page, body_text=""):
+    """
+    Organizer-i Seldon detail-dəki real company blokundan götürür.
+
+    Əsas hədəflər:
+    1. basis.myseldon.com/ru/company linkinin mətni
+    2. div[role="table"] daxilində row/cell strukturu:
+       Наименование -> organization
+       ИНН -> organization_inn
+       Регион -> ignore
+    3. body text fallback
+    """
+    result = {
+        "organization": "",
+        "organization_inn": "",
+        "organization_phone": "",
+        "organization_email": "",
+        "contact_person": "",
     }
 
     try:
-        rows = detail_page.locator(
-            "xpath=//h3[normalize-space()='Организатор']"
-            "/following-sibling::div//div[@role='row']"
+        # Customer/company bloku səhifənin aşağı hissəsində render oluna bilər.
+        try:
+            detail_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            detail_page.wait_for_timeout(2500)
+        except Exception:
+            pass
+
+        try:
+            detail_page.wait_for_selector(
+                "a[href*='basis.myseldon.com/ru/company'], div[role='table'] div[role='row']",
+                timeout=12000,
+            )
+        except Exception:
+            pass
+
+        js_data = detail_page.evaluate(
+            """
+            () => {
+                function normalize(value) {
+                    return (value || '')
+                        .replace(/\u00a0/g, ' ')
+                        .replace(/\s+/g, ' ')
+                        .trim();
+                }
+
+                function isMasked(value) {
+                    value = normalize(value);
+
+                    if (!value) return false;
+
+                    const chars = ['▒', '█', '■', '*', '•'];
+                    let count = 0;
+
+                    for (const ch of chars) {
+                        count += value.split(ch).length - 1;
+                    }
+
+                    return count >= 5 && count / Math.max(value.length, 1) > 0.3;
+                }
+
+                function isRegionValue(value) {
+                    value = normalize(value).toLowerCase();
+
+                    if (!value) return false;
+
+                    if (/\b\d{1,3}\s*регион\b/.test(value)) {
+                        return true;
+                    }
+
+                    const regionWords = [
+                        'область',
+                        'край',
+                        'республика',
+                        'автономный округ',
+                        'город',
+                        'район',
+                        'регион',
+                        'москва',
+                        'санкт-петербург',
+                        'севастополь'
+                    ];
+
+                    return regionWords.some(word => value.includes(word));
+                }
+
+                function looksLikeOrganization(value) {
+                    value = normalize(value);
+
+                    if (!value) return false;
+                    if (isMasked(value)) return false;
+                    if (isRegionValue(value)) return false;
+
+                    const lower = value.toLowerCase();
+
+                    const markers = [
+                        'акционерное общество',
+                        'ао ',
+                        ' ао',
+                        'общество с ограниченной ответственностью',
+                        'ооо ',
+                        ' ооо',
+                        'публичное акционерное общество',
+                        'пао ',
+                        ' пао',
+                        'муниципальное',
+                        'государственное',
+                        'федеральное',
+                        'казенное',
+                        'бюджетное',
+                        'автономное',
+                        'учреждение',
+                        'предприятие',
+                        'компания'
+                    ];
+
+                    if (markers.some(marker => lower.includes(marker))) {
+                        return true;
+                    }
+
+                    if (value.length > 10 && value.toUpperCase() === value) {
+                        return true;
+                    }
+
+                    return false;
+                }
+
+                function getText(el) {
+                    if (!el) return '';
+                    return normalize(el.innerText || el.textContent || '');
+                }
+
+                function getCellText(row, index) {
+                    const cells = Array.from(row.querySelectorAll('[role="cell"]'));
+
+                    if (!cells[index]) return '';
+
+                    return getText(cells[index]);
+                }
+
+                function findNearestTable(el) {
+                    let current = el;
+
+                    for (let i = 0; i < 10 && current; i++) {
+                        if (
+                            current.getAttribute &&
+                            current.getAttribute('role') === 'table'
+                        ) {
+                            return current;
+                        }
+
+                        current = current.parentElement;
+                    }
+
+                    return null;
+                }
+
+                function readRowsFromTable(table) {
+                    const output = {
+                        organization: '',
+                        organization_inn: '',
+                        organization_phone: '',
+                        organization_email: '',
+                        contact_person: ''
+                    };
+
+                    if (!table) return output;
+
+                    const rows = Array.from(table.querySelectorAll('[role="row"]'));
+
+                    for (const row of rows) {
+                        const label = getCellText(row, 0);
+                        const value = getCellText(row, 1);
+
+                        if (!label || !value) continue;
+                        if (isMasked(value)) continue;
+
+                        if (label === 'Наименование') {
+                            if (looksLikeOrganization(value)) {
+                                output.organization = value;
+                            }
+                        }
+
+                        if (label === 'ИНН') {
+                            const innMatch = value.match(/\d{10,12}/);
+
+                            if (innMatch) {
+                                output.organization_inn = innMatch[0];
+                            }
+                        }
+
+                        if (label === 'Телефон') {
+                            output.organization_phone = value;
+                        }
+
+                        if (label === 'Электронная почта') {
+                            output.organization_email = value;
+                        }
+
+                        if (label === 'Контактное лицо') {
+                            output.contact_person = value;
+                        }
+
+                        // Регион qəsdən oxunmur.
+                    }
+
+                    return output;
+                }
+
+                function merge(base, extra) {
+                    for (const key of Object.keys(base)) {
+                        if (!base[key] && extra[key]) {
+                            base[key] = extra[key];
+                        }
+                    }
+
+                    return base;
+                }
+
+                const result = {
+                    organization: '',
+                    organization_inn: '',
+                    organization_phone: '',
+                    organization_email: '',
+                    contact_person: '',
+                    method: '',
+                    debugBasisLinks: 0,
+                    debugTables: 0,
+                    debugRows: 0,
+                    debugFirstTables: []
+                };
+
+                // 1. Ən stabil mənbə: Seldon Basis company linki.
+                const basisLinks = Array.from(
+                    document.querySelectorAll('a[href*="basis.myseldon.com/ru/company"]')
+                );
+
+                result.debugBasisLinks = basisLinks.length;
+
+                for (const link of basisLinks) {
+                    const value = getText(link);
+
+                    if (looksLikeOrganization(value)) {
+                        result.organization = value;
+                        result.method = 'basis_company_link';
+
+                        const table = findNearestTable(link);
+                        result.debugRows = table ? table.querySelectorAll('[role="row"]').length : 0;
+                        merge(result, readRowsFromTable(table));
+
+                        return result;
+                    }
+                }
+
+                // 2. Verilən HTML: cardCustomer_infoGrid / infoGrid table.
+                const tables = Array.from(document.querySelectorAll('[role="table"]'));
+                result.debugTables = tables.length;
+
+                for (let tableIndex = 0; tableIndex < tables.length; tableIndex++) {
+                    const table = tables[tableIndex];
+                    const tableClass = table.getAttribute('class') || '';
+                    const tableText = getText(table);
+
+                    if (result.debugFirstTables.length < 5) {
+                        result.debugFirstTables.push({
+                            index: tableIndex,
+                            className: tableClass,
+                            text: tableText.slice(0, 300)
+                        });
+                    }
+
+                    const isLikelyCustomerTable =
+                        tableClass.includes('cardCustomer_infoGrid') ||
+                        tableClass.includes('infoGrid') ||
+                        (
+                            tableText.includes('Наименование') &&
+                            (
+                                tableText.includes('ИНН') ||
+                                tableText.includes('Регион') ||
+                                tableText.includes('Телефон') ||
+                                tableText.includes('Электронная почта')
+                            )
+                        );
+
+                    if (!isLikelyCustomerTable) {
+                        continue;
+                    }
+
+                    const tableResult = readRowsFromTable(table);
+
+                    if (tableResult.organization || tableResult.organization_inn) {
+                        merge(result, tableResult);
+                        result.method = tableClass.includes('cardCustomer_infoGrid')
+                            ? 'cardCustomer_infoGrid'
+                            : 'generic_role_table';
+                        result.debugRows = table.querySelectorAll('[role="row"]').length;
+
+                        return result;
+                    }
+                }
+
+                // 3. Son DOM fallback: bütün row-ları gəz.
+                const rows = Array.from(document.querySelectorAll('[role="row"]'));
+                result.debugRows = rows.length;
+
+                for (const row of rows) {
+                    const label = getCellText(row, 0);
+                    const value = getCellText(row, 1);
+
+                    if (!label || !value) continue;
+                    if (isMasked(value)) continue;
+
+                    if (label === 'Наименование' && looksLikeOrganization(value)) {
+                        result.organization = value;
+                        result.method = 'global_role_row';
+                    }
+
+                    if (label === 'ИНН') {
+                        const innMatch = value.match(/\d{10,12}/);
+
+                        if (innMatch && !result.organization_inn) {
+                            result.organization_inn = innMatch[0];
+                        }
+                    }
+
+                    if (result.organization && result.organization_inn) {
+                        return result;
+                    }
+                }
+
+                return result;
+            }
+            """
         )
 
-        row_count = rows.count()
+        if js_data:
+            print("[SELDON] Organizer DOM method:", clean_text(js_data.get("method")))
+            print("[SELDON] Organizer DOM basis links:", js_data.get("debugBasisLinks"))
+            print("[SELDON] Organizer DOM tables:", js_data.get("debugTables"))
+            print("[SELDON] Organizer DOM rows:", js_data.get("debugRows"))
+            print("[SELDON] Organizer DOM organization:", repr(clean_text(js_data.get("organization"))))
+            print("[SELDON] Organizer DOM INN:", repr(clean_text(js_data.get("organization_inn"))))
 
-        print("[SELDON] Organizer row count:", row_count)
+            if DEBUG_SELDON:
+                print("[SELDON] Organizer DOM first tables:", repr(js_data.get("debugFirstTables")))
 
-        for i in range(row_count):
-            row = rows.nth(i)
-            cells = row.locator("xpath=.//div[@role='cell']")
-
-            if cells.count() < 2:
-                continue
-
-            label = clean_text(cells.nth(0).inner_text(timeout=5000))
-            value = clean_text(cells.nth(1).inner_text(timeout=5000))
-
-            print(f"[SELDON] Organizer row: {label!r} => {value!r}")
-
-            if label in mapping:
-                result[mapping[label]] = value
+            result = {
+                "organization": normalize_organization_value(js_data.get("organization")),
+                "organization_inn": clear_if_masked(js_data.get("organization_inn")),
+                "organization_phone": clear_if_masked(js_data.get("organization_phone")),
+                "organization_email": clear_if_masked(js_data.get("organization_email")),
+                "contact_person": clear_if_masked(js_data.get("contact_person")),
+            }
 
     except Exception as e:
         print("[SELDON] Organizer DOM parse error:", e)
 
+    # 4. Body text fallback.
+    if not result.get("organization") or not result.get("organization_inn"):
+        body_result = extract_organizer_from_body_text(body_text)
+        body_result["organization"] = normalize_organization_value(
+            body_result.get("organization")
+        )
+        result = merge_organizer_data(result, body_result)
+
+    for key in list(result.keys()):
+        result[key] = clear_if_masked(result[key])
+
+    result["organization"] = normalize_organization_value(result.get("organization"))
+
+    print("[SELDON] Organizer final organization:", repr(result.get("organization")))
+    print("[SELDON] Organizer final INN:", repr(result.get("organization_inn")))
+
     return result
 
 def extract_price_from_detail_page(detail_page):
-    """
-    Detail səhifədə qiyməti DOM-dan götürür.
-
-    Bu funksiya grid/table qiymətini əsas götürmür.
-    Əsas prioritet detail səhifədə görünən bu blokdur:
-
-        Начальная цена
-        4 486 160,01 RUB
-
-    Qayda:
-    1. 'Начальная цена' label-i tapılır.
-    2. Eyni row/parent daxilində label-dən SONRA gələn qiymət götürülür.
-    3. 'Обеспечение заявки', 'Обеспечение контракта', 'Конечная цена'
-       kimi rəqəmlər qiymət kimi götürülmür.
-    """
-
     js = """
     () => {
         const labels = [
@@ -882,8 +1686,8 @@ def extract_price_from_detail_page(detail_page):
 
         function normalize(value) {
             return (value || '')
-                .replace(/\\u00a0/g, ' ')
-                .replace(/\\s+/g, ' ')
+                .replace(/\u00a0/g, ' ')
+                .replace(/\s+/g, ' ')
                 .trim();
         }
 
@@ -914,7 +1718,7 @@ def extract_price_from_detail_page(detail_page):
             value = normalize(value);
 
             const match = value.match(
-                /\\d{1,3}(?:\\s\\d{3})+(?:[,.]\\d{1,2})?\\s*(?:RUB|руб\\.?|₽)?|\\d{6,}(?:[,.]\\d{1,2})?\\s*(?:RUB|руб\\.?|₽)?/i
+                /\d{1,3}(?:\s\d{3})+(?:[,.]\d{1,2})?\s*(?:RUB|руб\.?|₽)?|\d{6,}(?:[,.]\d{1,2})?\s*(?:RUB|руб\.?|₽)?/i
             );
 
             return match ? normalize(match[0]) : '';
@@ -979,8 +1783,6 @@ def extract_price_from_detail_page(detail_page):
             for (const node of labelNodes) {
                 const nodeText = getText(node);
 
-                // 1. Label və qiymət eyni elementdədirsə,
-                // yalnız label-dən sonrakı hissədən qiymət götür.
                 const ownPrice = extractPriceAfterLabel(nodeText, label);
 
                 if (ownPrice) {
@@ -991,9 +1793,6 @@ def extract_price_from_detail_page(detail_page):
                     };
                 }
 
-                // 2. Screenshot-dakı əsas hal:
-                // parent direct children:
-                // [Начальная цена] [4 486 160,01 RUB]
                 let parent = node.parentElement;
 
                 for (let level = 0; level < 8 && parent; level++) {
@@ -1036,8 +1835,6 @@ def extract_price_from_detail_page(detail_page):
                         }
                     }
 
-                    // 3. Parent text-də label və qiymət birlikdədirsə,
-                    // yenə yalnız label-dən sonrakı hissədən oxu.
                     if (
                         parentText.toLowerCase().includes(labelLower) &&
                         parentText.length < 1200
@@ -1056,7 +1853,6 @@ def extract_price_from_detail_page(detail_page):
                     parent = parent.parentElement;
                 }
 
-                // 4. Label-in sibling-lərində qiymət varsa.
                 let current = node;
 
                 for (let level = 0; level < 6 && current; level++) {
@@ -1127,8 +1923,9 @@ def extract_price_from_detail_page(detail_page):
 
     return "", 0
 
+
 def get_title_from_detail_page(detail_page):
-    body_text_before = safe_inner_text(detail_page.locator("body").first, timeout=10000)
+    body_text_before = safe_inner_text_multiline(detail_page.locator("body").first, timeout=10000)
 
     try:
         detail_page.get_by_text("Полное наименование", exact=False).first.click(
@@ -1140,7 +1937,7 @@ def get_title_from_detail_page(detail_page):
     except Exception as e:
         print(f"[SELDON] Полное наименование klik alınmadı, fallback istifadə olunur: {e}")
 
-    body_text = safe_inner_text(detail_page.locator("body").first, timeout=10000)
+    body_text = safe_inner_text_multiline(detail_page.locator("body").first, timeout=10000)
 
     if not body_text:
         body_text = body_text_before
@@ -1181,6 +1978,40 @@ def get_title_from_detail_page(detail_page):
     return ""
 
 
+def debug_detail_page(detail_page, detail_url, tender_id="unknown"):
+    if not DEBUG_SELDON:
+        return
+
+    try:
+        os.makedirs("logs", exist_ok=True)
+
+        safe_id = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(tender_id or "unknown"))
+
+        detail_page.screenshot(
+            path=f"logs/seldon_detail_debug_{safe_id}.png",
+            full_page=True
+        )
+
+        body_text = safe_inner_text_multiline(detail_page.locator("body").first, timeout=10000)
+
+        print("=" * 80)
+        print("[SELDON][DEBUG][DETAIL URL]", detail_url)
+        print("[SELDON][DEBUG][CURRENT URL]", detail_page.url)
+        print("[SELDON][DEBUG][LOGIN PAGE]", is_seldon_login_page(detail_page))
+        print("[SELDON][DEBUG][BODY LOOKS LOGIN]", body_looks_like_login_page(body_text))
+        print("[SELDON][DEBUG][HAS MASKED TEXT]", "▒" in body_text)
+        print("[SELDON][DEBUG][BODY START]", repr(body_text[:3000]))
+        print("=" * 80)
+
+    except Exception as e:
+        print("[SELDON][DEBUG] detail debug error:", e)
+
+
+# -----------------------------------------------------------------------------
+# Detail parser
+# -----------------------------------------------------------------------------
+
+
 def parse_seldon_detail(page, grid_item, keyword):
     detail_url = grid_item.get("url")
 
@@ -1197,7 +2028,20 @@ def parse_seldon_detail(page, grid_item, keyword):
         detail_page.goto(detail_url, wait_until="networkidle", timeout=60000)
         detail_page.wait_for_timeout(3000)
 
-        body_text = safe_inner_text(detail_page.locator("body").first, timeout=15000)
+        body_text = safe_inner_text_multiline(detail_page.locator("body").first, timeout=15000)
+
+        if is_seldon_login_page(detail_page) or body_looks_like_login_page(body_text):
+            print("[SELDON] Detail səhifədə login göründü. Təkrar login ediləcək:", detail_url)
+
+            if not ensure_seldon_login(detail_page):
+                print("[SELDON] Detail üçün login alınmadı:", detail_url)
+                return None
+
+            detail_page.goto(detail_url, wait_until="networkidle", timeout=60000)
+            detail_page.wait_for_timeout(3000)
+            body_text = safe_inner_text_multiline(detail_page.locator("body").first, timeout=15000)
+
+        debug_detail_page(detail_page, detail_url, tender_id=detail_url.rstrip("/").split("/")[-2])
 
         if not body_text:
             print("[SELDON] Detail body boşdur:", detail_url)
@@ -1205,7 +2049,7 @@ def parse_seldon_detail(page, grid_item, keyword):
 
         title = get_title_from_detail_page(detail_page)
 
-        body_text_after_title = safe_inner_text(detail_page.locator("body").first, timeout=15000)
+        body_text_after_title = safe_inner_text_multiline(detail_page.locator("body").first, timeout=15000)
 
         if body_text_after_title:
             body_text = body_text_after_title
@@ -1269,6 +2113,7 @@ def parse_seldon_detail(page, grid_item, keyword):
             body_text,
             [
                 "Окончание приема заявок",
+                "Окончание приёма заявок",
                 "Окончание подачи заявок",
                 "Дата окончания подачи заявок",
                 "Срок подачи заявок",
@@ -1279,6 +2124,7 @@ def parse_seldon_detail(page, grid_item, keyword):
             deadline = grid_deadline
             print("[SELDON] Son tarix grid-dən götürüldü:", deadline)
 
+        deadline = clean_deadline_text(deadline)
         deadline_date = parse_date_from_text(deadline)
 
         if deadline_date is None:
@@ -1316,20 +2162,71 @@ def parse_seldon_detail(page, grid_item, keyword):
         if not tender_type:
             tender_type = grid_tender_type
 
-        organizer_data = extract_organizer_from_detail_page(detail_page)
+        organizer_data = extract_organizer_from_detail_page(detail_page, body_text=body_text)
 
-        organization = clean_text(organizer_data.get("organization"))
+        organization = normalize_organization_value(organizer_data.get("organization"))
 
         if not organization:
-            organization = extract_value_after_label_by_lines(
+            fallback_organization = extract_value_after_label_by_lines(
                 body_text,
                 [
                     "Организатор",
                     "Заказчик",
                     "Наименование заказчика",
                     "Покупатель",
+                ],
+                stop_labels=[
+                    "Источник",
+                    "Начальная цена",
+                    "НМЦК",
+                    "Статус",
+                    "Осталось дней",
+                    "Начало приема",
+                    "Окончание приема",
+                    "Способ закупки",
+                    "Тип закупки",
+                    "Регион",
+                    "ИНН",
+                    "E-mail",
+                    "ЭТП",
+                    "Ссылка",
+                    "Общие сведения",
+                    "Лоты",
+                    "Документы",
                 ]
             )
+
+            organization = normalize_organization_value(fallback_organization)
+
+        if not organization:
+            body_organizer_data = extract_organizer_from_body_text(body_text)
+            body_organizer_data["organization"] = normalize_organization_value(
+                body_organizer_data.get("organization")
+            )
+            organization = body_organizer_data.get("organization")
+            organizer_data = merge_organizer_data(organizer_data, body_organizer_data)
+
+        organization = normalize_organization_value(organization)
+
+        if not organization:
+            title_organization = normalize_organization_value(
+                extract_organization_from_title(title)
+            )
+
+            if title_organization:
+                print("[SELDON] Organization title fallback-dan götürüldü:", repr(title_organization))
+                organization = title_organization
+
+        organization_display = organization or "Yoxdur"
+
+        organization_inn = clear_if_masked(organizer_data.get("organization_inn")) or "Yoxdur"
+        organization_phone = clear_if_masked(organizer_data.get("organization_phone")) or "Yoxdur"
+        organization_email = clear_if_masked(organizer_data.get("organization_email")) or "Yoxdur"
+        contact_person = clear_if_masked(organizer_data.get("contact_person")) or "Yoxdur"
+
+        print("[SELDON] FINAL organization:", repr(organization_display))
+        print("[SELDON] FINAL organization_inn:", repr(organization_inn))
+        print("[SELDON] FINAL url:", detail_url)
 
         return {
             "source": SOURCE_NAME,
@@ -1343,12 +2240,12 @@ def parse_seldon_detail(page, grid_item, keyword):
             "publish_date": clean_text(publish_date) or "Yoxdur",
             "tender_type": clean_text(tender_type) or "Yoxdur",
             "type": clean_text(tender_type) or "Yoxdur",
-            "organization": clean_text(organization) or "Yoxdur",
-            "organization_inn": clean_text(organizer_data.get("organization_inn")) or "Yoxdur",
-            "organization_phone": clean_text(organizer_data.get("organization_phone")) or "Yoxdur",
-            "organization_email": clean_text(organizer_data.get("organization_email")) or "Yoxdur",
-            "contact_person": clean_text(organizer_data.get("contact_person")) or "Yoxdur",
-            "customer": clean_text(organization) or "Yoxdur",
+            "organization": organization_display,
+            "organization_inn": organization_inn,
+            "organization_phone": organization_phone,
+            "organization_email": organization_email,
+            "contact_person": contact_person,
+            "customer": organization_display,
             "title_links": [],
         }
 
@@ -1361,6 +2258,11 @@ def parse_seldon_detail(page, grid_item, keyword):
             detail_page.close()
         except Exception:
             pass
+
+
+# -----------------------------------------------------------------------------
+# Main source function
+# -----------------------------------------------------------------------------
 
 
 def search_seldon(page, keyword):
@@ -1438,6 +2340,7 @@ def search_seldon(page, keyword):
                 print(tender["url"])
                 print("Qiymət:", tender.get("price"))
                 print("Son tarix:", tender.get("deadline"))
+                print("Təşkilat:", tender.get("organization"))
 
                 if len(results) >= SELDON_MAX_ITEMS_PER_KEYWORD:
                     print("[SELDON] Limit doldu.")

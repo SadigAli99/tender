@@ -10,4 +10,5 @@ seldon_storage_state.json
 test_seldon_login.py
 test_seldon_detail_after_login.py
 test_seldon_commercial.py
+test_single_seldon_tender.py
 debug/
